@@ -32,6 +32,8 @@ if 'last_breakout_notify_time' not in st.session_state:
     st.session_state.last_breakout_notify_time = None
 if 'user_volume_spike_threshold' not in st.session_state:
     st.session_state.user_volume_spike_threshold = VOLUME_SPIKE_THRESHOLD
+if 'trading_mode' not in st.session_state:
+    st.session_state.trading_mode = "Swing (Daily)"
 
 # ========== FUNGSI BANTU ==========
 def fix_ticker(ticker: str) -> str:
@@ -519,15 +521,41 @@ def get_recommended_entry_stoploss(df: pd.DataFrame) -> dict:
     except:
         return {'entry': None, 'stoploss': None, 'target': None}
 
-# ========== SIDEBAR ==========
+# ========== SIDEBAR (DENGAN MODE TRADING BARU) ==========
 with st.sidebar:
     st.markdown("# 🤖 Robot Saham - AI Signal")
     ticker_input = st.text_input("Kode Saham", DEFAULT_TICKER, help="Contoh: BBCA.JK, BBRI.JK, ASII.JK")
     ticker = fix_ticker(ticker_input)
     if ticker != ticker_input:
         st.info(f"Format: {ticker}")
-    timeframe = st.selectbox("Timeframe", list(TIMEFRAMES.keys()))
+    timeframe = st.selectbox("Timeframe Chart", list(TIMEFRAMES.keys()))
     
+    st.markdown("---")
+    st.markdown("### 🧭 Mode Trading (PENTING!)")
+    
+    trading_mode = st.selectbox(
+        "Pilih gaya trading Anda",
+        ["Scalping (5-15 menit)", "Intraday (30 menit - 4 jam)", "Swing (Daily)", "Position (Weekly - Monthly)"],
+        index=2,
+        help="Pilih sesuai gaya trading Anda. Signal akan disesuaikan dengan mode ini."
+    )
+    st.session_state.trading_mode = trading_mode
+    
+    # Tampilkan penjelasan singkat per mode
+    if trading_mode == "Scalping (5-15 menit)":
+        st.caption("⚡ Fokus: Volume + Momentum cepat")
+        st.caption("⚠️ Noise tinggi, butuh eksekusi cepat")
+    elif trading_mode == "Intraday (30 menit - 4 jam)":
+        st.caption("📊 Fokus: Breakout + Trend harian")
+        st.caption("🎯 Cocok untuk trader aktif")
+    elif trading_mode == "Swing (Daily)":
+        st.caption("📈 Fokus: SMA + RSI + Trend stabil")
+        st.caption("🕐 Hold 1-5 hari")
+    else:
+        st.caption("🧭 Fokus: Trend besar + Akumulasi")
+        st.caption("📅 Hold mingguan - bulanan")
+    
+    st.markdown("---")
     st.markdown("### ⚙️ Pengaturan")
     user_volume_spike = st.slider("Volume Spike Threshold", 1.0, 5.0, st.session_state.user_volume_spike_threshold, 0.1)
     st.session_state.user_volume_spike_threshold = user_volume_spike
@@ -581,7 +609,7 @@ ai_score = ai_signals['ai_score']
 
 # ========== HEADER ==========
 st.title(f"🤖 {ticker}")
-st.caption(f"Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Mode: {trading_mode}")
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Harga Sekarang", f"Rp {last_close:,.2f}", f"{change_pct:+.2f}%")
@@ -743,9 +771,65 @@ else:
     st.warning(f"# ⏳ {robot_signal['signal']}")
 
 # <========================================================>
-# <==== TAMBAHAN 1: ARTI SIGNAL GLOBAL (TANPA HAPUS) =====>
+# <==== TAMBAHAN: INTERPRETASI SESUAI MODE TRADING =======>
 # <========================================================>
 
+st.markdown("## 🧠 INTERPRETASI SESUAI MODE")
+
+# Tentukan konteks berdasarkan mode trading
+if trading_mode == "Scalping (5-15 menit)":
+    context = "⚡ **Scalping** - Fokus: volume + momentum cepat (noise tinggi)"
+    context_detail = "Untuk scalping, sinyal ini perlu dikonfirmasi dengan order flow dan volume tick. Entry cepat, exit lebih cepat."
+    weight_factor = 0.7
+elif trading_mode == "Intraday (30 menit - 4 jam)":
+    context = "📊 **Intraday** - Fokus: breakout & trend harian"
+    context_detail = "Untuk intraday, fokus pada breakout level dan volume spike. Hold beberapa jam hingga sesi tutup."
+    weight_factor = 1.0
+elif trading_mode == "Swing (Daily)":
+    context = "📈 **Swing** - Fokus: SMA + RSI + trend stabil"
+    context_detail = "Untuk swing, konfirmasi dengan multi-timeframe. Hold 1-5 hari."
+    weight_factor = 1.2
+else:
+    context = "🧭 **Position** - Fokus: trend besar & akumulasi"
+    context_detail = "Untuk posisi trading, fokus pada akumulasi smart money dan trend makro. Hold mingguan-bulanan."
+    weight_factor = 1.3
+
+st.info(f"📌 **Mode aktif:** {trading_mode}")
+st.caption(context)
+st.caption(context_detail)
+
+st.markdown("---")
+
+# ========== KEPUTUSAN FINAL BERDASARKAN MODE ==========
+st.markdown("## 🧭 KEPUTUSAN FINAL (MODE-AWARE)")
+
+signal_score = robot_signal['score']
+adjusted_score = signal_score * weight_factor
+
+st.caption(f"Raw Score: {signal_score} | Adjusted Score (x{weight_factor}): {adjusted_score:.1f}")
+
+if adjusted_score >= 4:
+    st.success("🟢 **ENTRY LAYAK** (mode mendukung)")
+    if trading_mode == "Scalping (5-15 menit)":
+        st.write("📌 Saran: Entry dengan stop loss ketat, target kecil tp cepat")
+    elif trading_mode == "Intraday (30 menit - 4 jam)":
+        st.write("📌 Saran: Entry di breakout, target support/resistance berikutnya")
+    elif trading_mode == "Swing (Daily)":
+        st.write("📌 Saran: Entry bertahap, hold 1-5 hari")
+    else:
+        st.write("📌 Saran: Akumulasi bertahap, hold mingguan")
+        
+elif adjusted_score >= 2:
+    st.warning("🟡 **ENTRY BOLEH** (tapi hati-hati)")
+    st.write("📌 Saran: Gunakan ukuran posisi lebih kecil dari biasanya (50% posisi normal)")
+    
+else:
+    st.error("🔴 **TIDAK LAYAK ENTRY**")
+    st.write("📌 Saran: Lebih baik tunggu atau cari saham lain")
+
+st.markdown("---")
+
+# ========== ARTI SIGNAL GLOBAL ==========
 st.markdown("## 🧠 ARTI KEPUTUSAN SAAT INI")
 
 signal = robot_signal['signal']
@@ -768,60 +852,7 @@ elif signal == "STRONG SELL":
 
 st.markdown("---")
 
-# <========================================================>
-# <==== TAMBAHAN 2: KONDISI MARKET UNTUK TIPE TRADING ====>
-# <========================================================>
-
-st.markdown("## 🧭 KONDISI MARKET UNTUK TIPE TRADING")
-
-# Tentukan rekomendasi berdasarkan signal dan trend
-current_signal = robot_signal['signal']
-trend = trend_strength
-
-if current_signal in ["STRONG BUY", "BUY"] and trend in ["STRONG TREND", "MODERATE TREND"]:
-    scalping_advice = "✅ Cocok (momentum bagus)"
-    intraday_advice = "✅ Cocok (trend jelas)"
-    swing_advice = "✅ Cocok (arah jelas)"
-    position_advice = "✅ Bisa (akumulasi)"
-elif current_signal in ["SELL", "STRONG SELL"]:
-    scalping_advice = "⚠️ Hati-hati (tren turun)"
-    intraday_advice = "⚠️ Hati-hati (tekanan jual)"
-    swing_advice = "❌ Tidak cocok"
-    position_advice = "❌ Hindari"
-else:
-    scalping_advice = "🟡 Netral (volume rendah)"
-    intraday_advice = "🟡 Netral (arah belum jelas)"
-    swing_advice = "🟡 Tunggu konfirmasi"
-    position_advice = "🟡 Belum aman"
-
-col_t1, col_t2, col_t3, col_t4 = st.columns(4)
-
-with col_t1:
-    st.markdown("**📉 Scalping** (5–15 menit)")
-    st.write(scalping_advice)
-    st.caption("Fokus: volume & momentum cepat")
-
-with col_t2:
-    st.markdown("**📊 Intraday** (30m–4 jam)")
-    st.write(intraday_advice)
-    st.caption("Fokus: breakout & trend harian")
-
-with col_t3:
-    st.markdown("**📈 Swing** (Daily)")
-    st.write(swing_advice)
-    st.caption("Fokus: SMA & RSI stabil")
-
-with col_t4:
-    st.markdown("**🧭 Position** (Weekly)")
-    st.write(position_advice)
-    st.caption("Fokus: trend besar & akumulasi")
-
-st.markdown("---")
-
-# <========================================================>
-# <==== TAMBAHAN 3: KESIMPULAN SUPER SEDERHANA ==========>
-# <========================================================>
-
+# ========== KESIMPULAN CEPAT ==========
 st.markdown("## 🧾 KESIMPULAN CEPAT")
 
 final_signal = robot_signal['signal']
@@ -830,27 +861,22 @@ weighted = weighted_decision_engine(data, volume, ticker)
 if final_signal in ["STRONG BUY", "BUY"] and weighted >= 60:
     st.success("👉 **CENDERUNG BELI** (entry bertahap lebih aman)")
     st.write("📌 **Aksi:** Entry di harga support atau tunggu pullback kecil.")
-    st.write("📌 **Ukuran posisi:** Normal (2-3% dari modal per trade).")
     
 elif final_signal in ["STRONG BUY", "BUY"] and weighted < 60:
     st.info("👉 **CENDERUNG BELI TAPI HATI-HATI**")
     st.write("📌 **Aksi:** Entry dengan ukuran posisi lebih kecil dari biasanya.")
-    st.write("📌 **Ukuran posisi:** Kecil (1-1.5% dari modal per trade).")
     
 elif final_signal == "WAIT / HOLD":
     st.warning("👉 **TUNGGU** (tidak ada keunggulan saat ini)")
-    st.write("📌 **Aksi:** Jangan entry baru.")
-    st.write("📌 **Jika sudah pegang posisi:** Tahan dulu, jangan tambah posisi.")
+    st.write("📌 **Aksi:** Jangan entry baru. Jika sudah pegang posisi: tahan dulu.")
     
-elif final_signal in ["SELL", "STRONG SELL"] and weighted < 40:
+elif final_signal in ["SELL", "STRONG SELL"]:
     st.error("👉 **HINDARI BELI / EXIT** jika sudah punya posisi")
     st.write("📌 **Aksi:** Jangan entry baru, pertimbangkan cut loss.")
-    st.write("📌 **Jika sudah pegang posisi:** Keluar bertahap.")
     
 else:
     st.info("👉 **NETRAL** (market belum jelas)")
     st.write("📌 **Aksi:** Tunggu konfirmasi arah yang lebih jelas.")
-    st.write("📌 **Saran:** Lebih baik hold cash untuk sementara.")
 
 st.markdown("---")
 
