@@ -54,7 +54,7 @@ def load_data(ticker: str, timeframe: str) -> pd.DataFrame:
         if 'Volume' in df.columns:
             df['Volume'] = df['Volume'].fillna(0)
         
-        # Tambahkan indikator dasar untuk multi timeframe
+        # Tambahkan indikator dasar
         if len(df) >= 20:
             df['SMA20'] = df['Close'].rolling(20).mean()
         if len(df) >= 50:
@@ -203,11 +203,9 @@ def calculate_robot_indicators(df: pd.DataFrame) -> dict:
     }
 
 def calculate_multi_timeframe_score(df: pd.DataFrame) -> dict:
-    """Hitung score untuk 3m, 12m, 30m seperti di gambar Robot Saham"""
+    """Hitung score untuk 3m, 12m, 30m"""
     if df.empty:
         return {'3m': 0, '12m': 0, '30m': 0}
-    
-    close = df['Close']
     
     # 3 bulan (approx 60 hari trading)
     df_3m = df.tail(60)
@@ -302,7 +300,7 @@ def get_robot_signal(indicators: dict, mtf_score: dict) -> dict:
     else:
         reasons.append(f"Multi Timeframe Netral (avg {mtf_avg:.0f})")
     
-    # Trend Signal (Harga vs SMA)
+    # Trend Signal
     current_price = indicators.get('current_price', 0)
     sma20 = indicators.get('sma20', 0)
     if current_price > sma20:
@@ -622,7 +620,7 @@ col3.metric("Terendah", f"Rp {data['Low'].iloc[-1]:,.2f}")
 
 st.markdown("---")
 
-# ========== BARIS 1: INDICATOR (ROBOT SAHAM) ==========
+# ========== BARIS 1: INDICATOR ==========
 st.markdown("## 📊 INDICATOR")
 
 col_i1, col_i2, col_i3, col_i4 = st.columns(4)
@@ -646,7 +644,7 @@ with col_i4:
 
 st.markdown("---")
 
-# ========== BARIS 2: MULTI TIMEFRAME (ROBOT SAHAM) ==========
+# ========== BARIS 2: MULTI TIMEFRAME ==========
 st.markdown("## ⏰ MULTI TIMEFRAME")
 
 col_m1, col_m2, col_m3 = st.columns(3)
@@ -668,7 +666,7 @@ with col_m3:
 
 st.markdown("---")
 
-# ========== BARIS 3: SIGNAL & KEYAKINAN (ROBOT SAHAM) ==========
+# ========== BARIS 3: SIGNAL & KEYAKINAN ==========
 st.markdown("## 🎯 SIGNAL")
 
 col_s1, col_s2, col_s3 = st.columns([1, 2, 1])
@@ -686,7 +684,7 @@ with col_s2:
 
 st.markdown("---")
 
-# ========== BARIS 4: REKOMENDASI DETAIL (ROBOT SAHAM) ==========
+# ========== BARIS 4: REKOMENDASI DETAIL ==========
 st.markdown("## 📝 REKOMENDASI")
 
 col_r1, col_r2 = st.columns(2)
@@ -763,7 +761,7 @@ else:
 
 st.markdown("---")
 
-# ========== BARIS 7: FINAL SIGNAL (ROBOT SAHAM) ==========
+# ========== BARIS 7: FINAL SIGNAL ==========
 st.markdown("## 🏁 FINAL SIGNAL")
 
 if robot_signal['signal'] in ["STRONG BUY", "BUY"]:
