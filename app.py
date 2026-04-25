@@ -787,7 +787,6 @@ def main():
     # ------------------------------------------------------------
     # SECTION 1: HEADER CARD (harga & perubahan simulasi)
     # ------------------------------------------------------------
-    # hitung perubahan persen (harian)
     change_pct = 0
     if len(df) >= 2:
         change_pct = (price / df['Close'].iloc[-2] - 1) * 100
@@ -804,7 +803,7 @@ def main():
     """, unsafe_allow_html=True)
 
     # ------------------------------------------------------------
-    # SECTION 2: SIGNAL CARD (besar & jelas)
+    # SECTION 2: SIGNAL CARD
     # ------------------------------------------------------------
     signal_color = {
         "STRONG BUY": "#d4edda", "BUY": "#d1e7dd",
@@ -814,15 +813,7 @@ def main():
     text_color = "#155724" if "BUY" in decision['signal'] else "#721c24" if "SELL" in decision['signal'] else "#856404"
     st.markdown(f"""
     <div style="background-color: {signal_color}; border-radius: 20px; padding: 1rem; text-align: center; margin-bottom: 1.2rem;">
-        <div style="font-size: 2rem; font-weight: 800; letter-spacing: 1px-color: {signal_color}; border-radius: 20px; padding: 1rem; text-align: center; margin-bottom: 1.2rem;">
         <div style="font-size: 2rem; font-weight: 800; letter-spacing: 1px; color: {text_color};">{decision['signal']}</div>
-        <div style="font-size: 0.9rem; margin-top: 0.2rem; color: {text_color};">Confidence: {decision['confidence']} | Skor: {decision['score']:.1f}</div>
-        <div style="font-size: 0.8rem; margin-top: 0.3rem;">{get_signal_interpretation(decision['signal'])}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ------------------------------------------------------------
-    # SECTION 3; color: {text_color};">{decision['signal']}</div>
         <div style="font-size: 0.9rem; margin-top: 0.2rem; color: {text_color};">Confidence: {decision['confidence']} | Skor: {decision['score']:.1f}</div>
         <div style="font-size: 0.8rem; margin-top: 0.3rem;">{get_signal_interpretation(decision['signal'])}</div>
     </div>
@@ -834,103 +825,46 @@ def main():
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("#### 📊 Market Structure")
-        # Trend text
-        trend_text =: KEY METRICS (2 kolom)
-    # ------------------------------------------------------------
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("#### 📊 Market Structure")
-        # Trend text
         trend_text = "🟢 UPTREND" if indicators['supertrend_dir'] == 1 else "🔴 DOWNTREND"
-        st.metric("Trend "🟢 UPTREND" if indicators['supertrend_dir'] == 1 else "🔴 DOWNTREND"
         st.metric("Trend (Supertrend)", trend_text)
         rsi_val = indicators['rsi']
-        rsi_label = f"{r (Supertrend)", trend_text)
-        rsi_val = indicators['rsi']
         rsi_label = f"{rsi_val:.1f} "
-       si_val:.1f} "
-        if rsi_val if rsi_val < 30 < 30:
-            rsi_label += "(Oversold)"
-        elif rsi_val > 70:
+        if rsi_val < 30:
             rsi_label += "(Oversold)"
         elif rsi_val > 70:
             rsi_label += "(Overbought)"
         st.metric("RSI", rsi_label)
         st.metric("Volume", indicators['volume_status'])
-        
-    with col2:
-        st.markdown("#### 💰 Smart Money")
-        cmf_val = indicators['cmf']
-        cmf_label = "🟢 Akumulasi" if cmf_val > 0.15 else "🔴 Distribusi" if cmf_val < -0.15 else:
-            rsi_label += "(Overbought)"
-        st.metric("RSI", rsi_label)
-        st.metric("Volume", indicators['volume_status'])
-        
     with col2:
         st.markdown("#### 💰 Smart Money")
         cmf_val = indicators['cmf']
         cmf_label = "🟢 Akumulasi" if cmf_val > 0.15 else "🔴 Distribusi" if cmf_val < -0.15 else "⚪ Netral"
         st.metric("CMF", f"{cmf_label} ({cmf_val:.2f})")
-        prob_bull, prob_bear = bull_prob, bear_prob
-        st.metric("Probabilitas", f"🟢 Bullish {prob_bull:.0f}% / 🔴 "⚪ Netral"
-        st.metric("CMF", f"{cmf_label} ({cmf_val:.2f})")
-        prob_bull, prob_bear = bull_prob, bear_prob
-        st.metric("Probabilitas", f"🟢 Bullish {prob_bull:.0f}% / 🔴 Bearish {prob_bear:.0f}%")
-        # IHSG only if available
+        st.metric("Probabilitas", f"🟢 Bullish {bull_prob:.0f}% / 🔴 Bearish {bear_prob:.0f}%")
         if market_text and "tidak tersedia" not in market_text:
             st.metric("IHSG", market_text[:15])
         else:
             st.metric("IHSG", "—")
-    
-    # ------------------------------------------------------------
-    # SECTION 4: TR Bearish {prob_bear:.0f}%")
-        # IHSG only if available
-        if market_text and "tidak tersedia" not in market_text:
-            st.metric("IHSG", market_text[:15])
-        else:
-            st.metric("IHSG", "—")
-    
+
     # ------------------------------------------------------------
     # SECTION 4: TRADING PLAN & KEY LEVELS
     # ------------------------------------------------------------
     st.markdown("#### 🎯 Trading Plan")
     plan_cols = st.columns(3)
-    # Buy Entry
-    entry_val = entry_levels['buy_entry']
-    planADING PLAN & KEY LEVELS
-    # ------------------------------------------------------------
-    st.markdown("#### 🎯 Trading Plan")
-    plan_cols = st.columns(3)
-    # Buy Entry
     entry_val = entry_levels['buy_entry']
     plan_cols[0].metric("🎯 Buy Entry", f"Rp {entry_val:,.0f}" if entry_val > 0 else "—")
-    # Stop Loss
-    sl_val = entry_levels['stop_loss']
-    plan_cols[1].metric("🛑 Stop Loss", f"Rp {sl_val_cols[0].metric("🎯 Buy Entry", f"Rp {entry_val:,.0f}" if entry_val > 0 else "—")
-    # Stop Loss
     sl_val = entry_levels['stop_loss']
     plan_cols[1].metric("🛑 Stop Loss", f"Rp {sl_val:,.0f}" if sl_val > 0 else "—")
-    # Target
     tgt_val = entry_levels['target']
-    plan_cols:,.0f}" if sl_val > 0 else "—")
-    # Target
-    tgt_val = entry_levels['target']
-    plan_cols[2].metric("🎯 Target", f"Rp {tgt_val:,.0f}" if[2].metric("🎯 Target", f"Rp {tgt_val:,.0f}" if tgt_val > 0 else "—")
+    plan_cols[2].metric("🎯 Target", f"Rp {tgt_val:,.0f}" if tgt_val > 0 else "—")
 
     st.markdown("#### 📌 Key Levels")
     level_cols = st.columns(2)
     support_val = indicators['support']
     resistance_val = indicators['resistance']
-    level_cols[0].metric("Support", f"Rp {support_val:,.0f}" if support tgt_val > 0 else "—")
-
-    st.markdown("#### 📌 Key Levels")
-    level_cols = st.columns(2)
-    support_val = indicators['support']
-    resistance_val = indicators['resistance']
-    level_cols[0].metric("Support", f"Rp {support_val:,.0f}"_val > 0 else "—")
+    level_cols[0].metric("Support", f"Rp {support_val:,.0f}" if support_val > 0 else "—")
     level_cols[1].metric("Resistance", f"Rp {resistance_val:,.0f}" if resistance_val > 0 else "—")
 
-    # Jika ada swing low/high yang valid (tidak nol)
     swing_low = indicators['swing_low']
     swing_high = indicators['swing_high']
     if swing_low > 0 or swing_high > 0:
@@ -964,64 +898,6 @@ def main():
             st.write(f"- {reason}")
         st.markdown(f"**Total Skor: {decision['score']}**")
 
-    # Tombol backtest dan riwayat di dua kolom
-    col_bt, col_hist = st.columns(2)
-    with col_bt:
-        with st.expander("📊 Backtest (6 bulan)"):
-            if st.button("Jalankan Backtest"):
-                with st.spinner("Menjalankan..."):
-                    bt = run_backtest_advanced(df, weights, detect_market_regime, 180)
-                    if bt:
-                        st.write(f"Jumlah trade: {bt['trades']}")
-                        st.write(f"Winrate: {bt['winrate']:.1f}%")
-                        st.write(f"Profit Factor: {bt['profit_factor']:.2f}")
-                        st.write(f"Max Drawdown: {bt['max_drawdown']:.1f}%")
-                        st.write(f"Final Balance: Rp {bt['final_balance']:,.0f}")
-                    else:
-                        st.warning("Data tidak cukup atau tidak ada sinyal")
-    with col_hist:
-        with st.expander("📜 Riwayat Sinyal"):
-            if st.session_state.signal_history:
-                st.dataframe(pd.DataFrame(st.session_state.signal_history).head(5))
-                csv = pd.DataFrame(st.session_state.signal_history).to_csv(index=False).encode()
-                st if support_val > 0 else "—")
-    level_cols[1].metric("Resistance", f"Rp {resistance_val:,.0f}" if resistance_val > 0 else "—")
-
-    # Jika ada swing low/high yang valid (tidak nol)
-    swing_low = indicators['swing_low']
-    swing_high = indicators['swing_high']
-    if swing_low > 0 or swing_high > 0:
-        st.markdown("##### 🔁 Swing Points")
-        sw_cols = st.columns(2)
-        sw_cols[0].metric("Swing Low", f"Rp {swing_low:,.0f}" if swing_low > 0 else "—")
-        sw_cols[1].metric("Swing High", f"Rp {swing_high:,.0f}" if swing_high > 0 else "—")
-
-    # ------------------------------------------------------------
-    # SECTION 5: ADVANCED METRICS (opsional)
-    # ------------------------------------------------------------
-    if show_advanced:
-        with st.expander("📈 Indikator Lanjutan"):
-            adv_cols = st.columns(5)
-            adv_cols[0].metric("Stochastic K", f"{indicators['stoch_k']:.1f}")
-            adv_cols[1].metric("Stochastic D", f"{indicators['stoch_d']:.1f}")
-            adv_cols[2].metric("Williams %R", f"{indicators['williams_r']:.1f}")
-            adv_cols[3].metric("CCI", f"{indicators['cci']:.1f}")
-            adv_cols[4].metric("MFI", f"{indicators['mfi']:.1f}")
-            adv_cols2 = st.columns(4)
-            adv_cols2[0].metric("KST", f"{indicators['kst']:.1f}")
-            adv_cols2[1].metric("Elder Bull", f"{indicators['elder_bull']:.0f}")
-            adv_cols2[2].metric("Elder Bear", f"{indicators['elder_bear']:.0f}")
-            adv_cols2[3].metric("GMMA Spread", f"{indicators['gmma_spread']:.0f}")
-
-    # ------------------------------------------------------------
-    # SECTION 6: DETAIL ANALISIS & BACKTEST
-    # ------------------------------------------------------------
-    with st.expander("📋 Detail Analisis (skor & kontribusi)"):
-        for reason in decision['reasons']:
-            st.write(f"- {reason}")
-        st.markdown(f"**Total Skor: {decision['score']}**")
-
-    # Tombol backtest dan riwayat di dua kolom
     col_bt, col_hist = st.columns(2)
     with col_bt:
         with st.expander("📊 Backtest (6 bulan)"):
@@ -1042,17 +918,6 @@ def main():
                 st.dataframe(pd.DataFrame(st.session_state.signal_history).head(5))
                 csv = pd.DataFrame(st.session_state.signal_history).to_csv(index=False).encode()
                 st.download_button("📥 Ekspor CSV", csv, "signal_history.csv", "text/csv")
-            else:
-                st.info("Belum ada sinyal")
-
-    with st.expander("📐 Position Sizing"):
-        capital = st.number_input("Modal (Rp)", value=100_000_000.0, step=10_000_000.0)
-        risk_percent = st.number_input("Risiko per trade (%)", value=2.0, step=0.5)
-        shares, pos_value, risk_amt = position_sizing(capital, risk_percent, entry_levels['buy_entry'], entry_levels['stop_loss'])
-        if shares > 0:
-            st.write(f"Jumlah saham: {shares:,} lembar")
-            st.write(f"Nilai posisi: Rp {pos_value:,.0f} ({pos_value/capital*100:.1f}% dari modal)")
-            st.write(f"Risiko stop loss: Rp {risk_amt:,.0f} ({risk_percent:..download_button("📥 Ekspor CSV", csv, "signal_history.csv", "text/csv")
             else:
                 st.info("Belum ada sinyal")
 
