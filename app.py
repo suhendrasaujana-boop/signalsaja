@@ -140,9 +140,8 @@ def calculate_elder_ray(df, window=13):
     ema = df['Close'].ewm(span=window, adjust=False).mean()
     return df['High'] - ema, df['Low'] - ema
 
-# ========== FUNGSI BARU: MARKET REGIME & STRUCTURE ==========
+# ========== MARKET REGIME & STRUCTURE ==========
 def detect_market_regime(df, adx_threshold=25):
-    """Return 'TREND' or 'SIDEWAYS' based on ADX and EMA slope."""
     if len(df) < 30:
         return "SIDEWAYS"
     adx = ta.trend.ADXIndicator(df['High'], df['Low'], df['Close'], window=14).adx()
@@ -155,7 +154,6 @@ def detect_market_regime(df, adx_threshold=25):
         return "SIDEWAYS"
 
 def get_swing_points(df, lookback=5):
-    """Cari swing low dan high terbaru."""
     if len(df) < lookback*2:
         return df['Low'].iloc[-1], df['High'].iloc[-1]
     low = df['Low'].iloc[-lookback*2:]
@@ -165,7 +163,6 @@ def get_swing_points(df, lookback=5):
     return swing_low, swing_high
 
 def get_mtf_alignment(df_daily, df_weekly, df_monthly):
-    """Hitung alignment sinyal antar timeframe (BUY=+1, SELL=-1, HOLD=0)."""
     def sig_to_num(df):
         if df.empty or len(df) < 30:
             return 0
@@ -183,11 +180,9 @@ def get_mtf_alignment(df_daily, df_weekly, df_monthly):
     d = sig_to_num(df_daily)
     w = sig_to_num(df_weekly)
     m = sig_to_num(df_monthly)
-    # Alignment: rata-rata berbobot (daily lebih penting)
-    alignment = (d*0.5 + w*0.3 + m*0.2)
-    return alignment  # antara -1 dan 1
+    return d*0.5 + w*0.3 + m*0.2
 
-# ========== INDIKATOR UTAMA (AMAN) ==========
+# ========== INDIKATOR UTAMA ==========
 @st.cache_data(ttl=CACHE_TTL)
 def calculate_all_indicators(df, st_period=10, st_mult=3.0, mode="Swing (Daily)"):
     if isinstance(df.columns, pd.MultiIndex):
@@ -343,11 +338,12 @@ def get_latest_indicators(df):
         'swing_high': swing_high
     }
 
-# ========== DECISION ENGINE DENGAN REGIME & REDUNDANSI ==========
+# ========== DECISION ENGINE (clean version, hanya RSI untuk momentum) ==========
 def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
     score = 0
     reasons = []
-    # Trend group
+    
+    # Trend group (sama seperti sebelumnya)
     trend_score = 0
     if indicators['price'] > indicators['ema200']:
         trend_score += 1.5
@@ -369,36 +365,19 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
     score += trend_score * weights['trend']
     reasons.append(f"Trend: {trend_score:.2f} (bobot {weights['trend']})")
 
-    # Momentum group (gabung RSI, Stoch, Williams, CCI, MFI)
+    # Momentum group - HANYA RSI (soft disable stoch, willr, cci, mfi)
     rsi = indicators['rsi']
-    stoch = indicators['stoch_k']
-    willr = indicators['williams_r']
-    cci = indicators['cci']
-    mfi = indicators['mfi']
-    mom_score = 0
+    mom_score = 0.0
     if rsi < 30:
-        mom_score += 1.0
+        mom_score = 1.0
     elif rsi > 70:
-        mom_score -= 1.0
-    if stoch < 20:
-        mom_score += 0.8
-    elif stoch > 80:
-        mom_score -= 0.8
-    if willr < -80:
-        mom_score += 0.8
-    elif willr > -20:
-        mom_score -= 0.8
-    if cci < -100:
-        mom_score += 0.5
-    elif cci > 100:
-        mom_score -= 0.5
-    if mfi < 20:
-        mom_score += 0.8
-    elif mfi > 80:
-        mom_score -= 0.8
-    mom_score = mom_score / 5.0
+        mom_score = -1.0
+    elif rsi < 50:
+        mom_score = 0.3
+    elif rsi > 50:
+        mom_score = -0.3
     score += mom_score * weights['momentum']
-    reasons.append(f"Momentum: {mom_score:.2f} (bobot {weights['momentum']})")
+    reasons.append(f"Momentum (RSI={rsi:.0f}): {mom_score:.2f} (bobot {weights['momentum']})")
 
     # Volume group
     vol_score = 0
@@ -414,25 +393,20 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
     score += vol_score * weights['volume']
     reasons.append(f"Volume: {vol_score:.2f} (bobot {weights['volume']})")
 
-    # Smart Money group
+    # Smart Money group (hanya CMF, AD diabaikan)
     smart_score = 0
     cmf = indicators['cmf']
     if cmf > 0.15:
-        smart_score += 1.5
+        smart_score = 1.5
     elif cmf < -0.15:
-        smart_score -= 1.5
+        smart_score = -1.5
     elif cmf > 0:
-        smart_score += 0.5
+        smart_score = 0.5
     elif cmf < 0:
-        smart_score -= 0.5
-    ad = indicators['ad']
-    if ad > 0:
-        smart_score += 0.5
-    else:
-        smart_score -= 0.5
-    smart_score = smart_score / 2.0
+        smart_score = -0.5
+    # AD tidak dipakai lagi
     score += smart_score * weights['smart_money']
-    reasons.append(f"Smart Money: {smart_score:.2f} (bobot {weights['smart_money']})")
+    reasons.append(f"Smart Money (CMF={cmf:.2f}): {smart_score:.2f} (bobot {weights['smart_money']})")
 
     # Structure
     struct_score = 0
@@ -440,9 +414,9 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
     swing_low = indicators['swing_low']
     swing_high = indicators['swing_high']
     if price > swing_high:
-        struct_score += 1.0
+        struct_score = 1.0
     elif price < swing_low:
-        struct_score -= 1.0
+        struct_score = -1.0
     score += struct_score * weights['structure']
     reasons.append(f"Structure: {struct_score:.2f} (bobot {weights['structure']})")
 
@@ -474,7 +448,7 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
         signal, confidence, color = "HOLD", "LOW", "warning"
     return {'signal': signal, 'color': color, 'score': final_score, 'confidence': confidence, 'reasons': reasons}
 
-# ========== ENTRY & STOP LOSS BERBASIS STRUCTURE ==========
+# ========== ENTRY & STOP LOSS ==========
 def get_entry_levels_advanced(df, indicators, regime):
     price = indicators['price']
     atr = indicators['atr']
@@ -503,12 +477,12 @@ def get_entry_levels_advanced(df, indicators, regime):
         'target': target
     }
 
-# ========== BACKTEST VALID DENGAN EQUITY CURVE ==========
+# ========== BACKTEST ==========
 def run_backtest_advanced(df, weights, regime_func, period_days=180):
     if df.empty or len(df) < period_days:
         return None
     df_test = df.tail(period_days).copy()
-    balance = 100_000_000  # modal awal Rp 100jt
+    balance = 100_000_000
     positions = []
     equity = [balance]
     trades = []
@@ -517,7 +491,7 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180):
         slice_df = df_test.iloc[:i+1]
         ind = get_latest_indicators(slice_df)
         regime = regime_func(slice_df)
-        dec = weighted_decision_v2(ind, 0, regime, weights)  # mtf di backtest diabaikan
+        dec = weighted_decision_v2(ind, 0, regime, weights)
         if dec['signal'] in ['BUY', 'STRONG BUY'] and len(positions) == 0:
             entry_price = ind['price']
             stop_loss = ind['swing_low'] - ind['atr']*0.5
@@ -677,34 +651,35 @@ def main():
         ticker += '.JK'
     timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1wk", "1mo"], index=0)
     
-    # Mode trading dengan 4 opsi
+    # Mode trading
     trading_mode = st.sidebar.selectbox(
         "Mode Trading",
         ["Scalping (5-15 menit)", "Intraday (30 menit - 4 jam)", "Swing (Daily)", "Position (Weekly - Monthly)"],
         index=2
     )
     st.session_state.trading_mode = trading_mode
-    
-    # Warning untuk mode scalping/intraday
     if trading_mode in ["Scalping (5-15 menit)", "Intraday (30 menit - 4 jam)"]:
-        st.sidebar.warning("⚠️ Mode ini menggunakan data **daily** karena yfinance tidak menyediakan data menit yang stabil. Sinyal lebih cocok untuk trading harian, bukan real-time menit.")
+        st.sidebar.warning("⚠️ Mode ini menggunakan data **daily** karena yfinance tidak menyediakan data menit yang stabil. Sinyal lebih cocok untuk trading harian.")
     
-    # Parameter adaptif Supertrend
+    # Parameter Supertrend
     if trading_mode == "Scalping (5-15 menit)":
         st_period, st_mult = 7, 2.5
     elif trading_mode == "Intraday (30 menit - 4 jam)":
         st_period, st_mult = 8, 2.7
     elif trading_mode == "Swing (Daily)":
         st_period, st_mult = 10, 3.0
-    else:  # Position
+    else:
         st_period, st_mult = 20, 3.0
+    
+    # Toggle UI mode
+    ui_mode = st.sidebar.selectbox("Mode Tampilan", ["Simple (Recommended)", "Advanced (Full Indicators)"], index=0)
     
     with st.sidebar.expander("⚙️ Bobot Indikator (Grup)"):
         weights = {}
         weights['trend'] = st.slider("Trend (EMA, Supertrend, PSAR)", 0.0, 3.0, st.session_state.custom_weights.get('trend', 2.0), 0.1)
-        weights['momentum'] = st.slider("Momentum (RSI, Stoch, Williams)", 0.0, 3.0, st.session_state.custom_weights.get('momentum', 1.5), 0.1)
+        weights['momentum'] = st.slider("Momentum (RSI)", 0.0, 3.0, st.session_state.custom_weights.get('momentum', 1.5), 0.1)
         weights['volume'] = st.slider("Volume (OBV, Volume Spike)", 0.0, 3.0, st.session_state.custom_weights.get('volume', 1.5), 0.1)
-        weights['smart_money'] = st.slider("Smart Money (CMF, A/D)", 0.0, 3.0, st.session_state.custom_weights.get('smart_money', 1.5), 0.1)
+        weights['smart_money'] = st.slider("Smart Money (CMF)", 0.0, 3.0, st.session_state.custom_weights.get('smart_money', 1.5), 0.1)
         weights['structure'] = st.slider("Structure (Swing Points)", 0.0, 3.0, st.session_state.custom_weights.get('structure', 1.0), 0.1)
         if st.button("Simpan Bobot"):
             st.session_state.custom_weights = weights
@@ -725,10 +700,8 @@ def main():
     indicators = get_latest_indicators(df)
     price = indicators['price']
     
-    # Market regime
     regime = detect_market_regime(df)
     
-    # MTF alignment (dengan loading aman)
     def safe_load(ticker, period, interval):
         try:
             d = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False)
@@ -762,6 +735,7 @@ def main():
     st.title(f"🤖 {ticker}")
     st.caption(f"Mode: {trading_mode} | Regime: {regime} | MTF Alignment: {mtf_alignment:.2f}")
     
+    # ========== METRIK UTAMA (selalu tampil) ==========
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("💰 Harga", f"Rp {price:,.0f}")
     col2.metric("📊 RSI", f"{indicators['rsi']:.1f}")
@@ -801,6 +775,22 @@ def main():
     col1, col2 = st.columns(2)
     col1.metric("🌍 IHSG", market_text[:20], help=market_text)
     col2.metric("📈 Bullish Prob.", f"{bull_prob:.0f}%")
+    
+    # ========== INDIKATOR TAMBAHAN (hanya jika mode Advanced) ==========
+    if ui_mode == "Advanced (Full Indicators)":
+        st.markdown("---")
+        st.caption("📊 Indikator Lanjutan (Mode Advanced)")
+        adv_cols = st.columns(5)
+        adv_cols[0].metric("Stochastic K", f"{indicators['stoch_k']:.1f}")
+        adv_cols[1].metric("Stochastic D", f"{indicators['stoch_d']:.1f}")
+        adv_cols[2].metric("Williams %R", f"{indicators['williams_r']:.1f}")
+        adv_cols[3].metric("CCI", f"{indicators['cci']:.1f}")
+        adv_cols[4].metric("MFI", f"{indicators['mfi']:.1f}")
+        adv_cols2 = st.columns(4)
+        adv_cols2[0].metric("KST", f"{indicators['kst']:.1f}")
+        adv_cols2[1].metric("Elder Bull", f"{indicators['elder_bull']:.0f}")
+        adv_cols2[2].metric("Elder Bear", f"{indicators['elder_bear']:.0f}")
+        adv_cols2[3].metric("GMMA Spread", f"{indicators['gmma_spread']:.0f}")
     
     if entry_eligible:
         st.success(f"🟢 **ENTRY LAYAK** (Skor: {decision['score']:.1f} | Regime: {regime})")
