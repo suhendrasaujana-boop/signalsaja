@@ -10,7 +10,6 @@ warnings.filterwarnings('ignore')
 
 st.set_page_config(layout="wide", page_title="Robot Saham - AI Decision Engine", page_icon="🤖")
 
-# CSS untuk margin lebih rapat (tapi tidak mengubah ukuran font secara ekstrim)
 st.markdown("""
 <style>
     .block-container { padding-top: 0.5rem; padding-bottom: 0rem; }
@@ -20,7 +19,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Konstanta
 CACHE_TTL = 300
 DEFAULT_TICKER = "BBCA.JK"
 BREAKOUT_COOLDOWN_HOURS = 24
@@ -42,7 +40,7 @@ if 'custom_weights' not in st.session_state:
         'stoch_willr': 1.0, 'aroon': 1.0, 'gmma': 1.0, 'kst': 0.5
     }
 
-# ========== FUNGSI INDIKATOR ==========
+# ========== FUNGSI INDIKATOR (tetap) ==========
 def calculate_supertrend(df, period=10, multiplier=3.0):
     high, low, close = df['High'], df['Low'], df['Close']
     atr = ta.volatility.average_true_range(high, low, close, window=period)
@@ -154,21 +152,42 @@ def calculate_elder_ray(df, window=13):
     ema = df['Close'].ewm(span=window, adjust=False).mean()
     return df['High'] - ema, df['Low'] - ema
 
-# ========== INDIKATOR UTAMA (SINGLE SOURCE) ==========
+# ========== INDIKATOR UTAMA (AMAN) ==========
 @st.cache_data(ttl=CACHE_TTL)
 def calculate_all_indicators(df, st_period=10, st_mult=3.0, mode="Swing (Daily)"):
-    if df.empty or len(df) < 30:
-        return df
     # Flatten MultiIndex jika ada
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    
+    # Jika data kosong atau terlalu pendek, kembalikan dataframe dummy dengan kolom lengkap
+    if df.empty or len(df) < 30:
+        idx = df.index if not df.empty else pd.date_range(end=datetime.today(), periods=1)
+        dummy_df = pd.DataFrame(index=idx)
+        required_cols = [
+            'Close','High','Low','Volume',
+            'SMA20','SMA50','EMA200','RSI',
+            'MACD','MACD_Signal','MACD_Hist',
+            'Stoch_K','Stoch_D','ATR',
+            'Volume_MA','support','resistance',
+            'AD','CMF','ST_Supertrend','ST_Dir',
+            'PSAR','PSAR_Dir','OBV','OBV_MA',
+            'MFI','Aroon_Up','Aroon_Down',
+            'Williams_R','CCI','KST',
+            'Elder_Bull','Elder_Bear','GMMA_Spread'
+        ]
+        for col in required_cols:
+            dummy_df[col] = 0.0
+        if not df.empty and 'Close' in df.columns:
+            dummy_df['Close'] = df['Close'].values
+        return dummy_df
+
+    # Data cukup, hitung indikator
     close = df['Close']
     high = df['High']
     low = df['Low']
     has_vol = 'Volume' in df.columns and df['Volume'].sum() != 0
     volume = df['Volume'] if has_vol else pd.Series(0, index=df.index)
     
-    # Moving averages
     df['SMA20'] = close.rolling(20, min_periods=1).mean()
     df['SMA50'] = close.rolling(50, min_periods=1).mean()
     df['EMA200'] = close.rolling(200).mean() if len(close) >= 200 else close
@@ -201,7 +220,6 @@ def calculate_all_indicators(df, st_period=10, st_mult=3.0, mode="Swing (Daily)"
     else:
         df['AD'] = df['CMF'] = 0.0
     
-    # Indikator tambahan
     st_line, st_dir = calculate_supertrend(df, period=st_period, multiplier=st_mult)
     df['ST_Supertrend'] = st_line
     df['ST_Dir'] = st_dir
@@ -241,62 +259,72 @@ def calculate_all_indicators(df, st_period=10, st_mult=3.0, mode="Swing (Daily)"
     return df
 
 def get_latest_indicators(df):
-    """Ambil nilai terbaru dari dataframe. Asumsikan kolom sudah benar (capitalized)."""
+    """Ambil nilai terbaru dari dataframe. Aman terhadap MultiIndex dan kolom hilang."""
     if df.empty:
         return {}
-    last = df.iloc[-1]
+    # Flatten MultiIndex jika masih ada
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    # Konversi ke dictionary agar akses aman
+    last_dict = df.iloc[-1].to_dict()
+    def get_val(key, default=0.0):
+        return last_dict.get(key, default)
+    
+    price = get_val('Close', 0.0)
+    
     # Volume status
-    try:
-        if 'Volume_MA' in df.columns and df['Volume_MA'].iloc[-1] > 0:
-            vol = df['Volume'].iloc[-1]
+    vol_status = "Normal"
+    if 'Volume_MA' in df.columns and 'Volume' in df.columns:
+        try:
             vol_ma = df['Volume_MA'].iloc[-1]
-            if vol > vol_ma * 1.5:
-                vol_status = "Tinggi"
-            elif vol < vol_ma:
-                vol_status = "Rendah"
-            else:
-                vol_status = "Normal"
-        else:
-            vol_status = "Normal"
-    except:
-        vol_status = "Normal"
-    high_30d = df['High'].tail(30).max()
-    low_30d = df['Low'].tail(30).min()
+            if vol_ma > 0:
+                vol = df['Volume'].iloc[-1]
+                if vol > vol_ma * 1.5:
+                    vol_status = "Tinggi"
+                elif vol < vol_ma:
+                    vol_status = "Rendah"
+        except:
+            pass
+    
+    # High/Low 30 hari
+    high_30d = df['High'].tail(30).max() if ('High' in df and len(df) >= 30) else price
+    low_30d = df['Low'].tail(30).min() if ('Low' in df and len(df) >= 30) else price
+    
     return {
-        'price': last['Close'],
-        'sma20': last['SMA20'],
-        'sma50': last['SMA50'],
-        'ema200': last['EMA200'],
-        'rsi': last['RSI'],
-        'macd_hist': last['MACD_Hist'],
-        'stoch_k': last['Stoch_K'],
-        'stoch_d': last['Stoch_D'],
-        'atr': last['ATR'],
+        'price': price,
+        'sma20': get_val('SMA20', price),
+        'sma50': get_val('SMA50', price),
+        'ema200': get_val('EMA200', price),
+        'rsi': get_val('RSI', 50.0),
+        'macd_hist': get_val('MACD_Hist', 0.0),
+        'stoch_k': get_val('Stoch_K', 50.0),
+        'stoch_d': get_val('Stoch_D', 50.0),
+        'atr': get_val('ATR', price * 0.02),
         'volume_status': vol_status,
-        'support': last['support'],
-        'resistance': last['resistance'],
-        'supertrend_dir': last['ST_Dir'],
-        'supertrend_value': last['ST_Supertrend'],
-        'psar_dir': last['PSAR_Dir'],
-        'obv': last['OBV'],
-        'obv_ma': last['OBV_MA'],
-        'mfi': last['MFI'],
-        'aroon_up': last['Aroon_Up'],
-        'aroon_down': last['Aroon_Down'],
-        'williams_r': last['Williams_R'],
-        'cci': last['CCI'],
-        'kst': last.get('KST', 0),
-        'elder_bull': last['Elder_Bull'],
-        'elder_bear': last['Elder_Bear'],
-        'gmma_spread': last['GMMA_Spread'],
-        'cmf': last['CMF'],
-        'ad': last['AD'],
+        'support': get_val('support', price * 0.95),
+        'resistance': get_val('resistance', price * 1.05),
+        'supertrend_dir': get_val('ST_Dir', 0),
+        'supertrend_value': get_val('ST_Supertrend', price),
+        'psar_dir': get_val('PSAR_Dir', 0),
+        'obv': get_val('OBV', 0.0),
+        'obv_ma': get_val('OBV_MA', 0.0),
+        'mfi': get_val('MFI', 50.0),
+        'aroon_up': get_val('Aroon_Up', 50.0),
+        'aroon_down': get_val('Aroon_Down', 50.0),
+        'williams_r': get_val('Williams_R', -50.0),
+        'cci': get_val('CCI', 0.0),
+        'kst': get_val('KST', 0.0),
+        'elder_bull': get_val('Elder_Bull', 0.0),
+        'elder_bear': get_val('Elder_Bear', 0.0),
+        'gmma_spread': get_val('GMMA_Spread', 0.0),
+        'cmf': get_val('CMF', 0.0),
+        'ad': get_val('AD', 0.0),
         'high_30d': high_30d,
         'low_30d': low_30d
     }
 
+# ========== FUNGSI PENDUKUNG LAINNYA ==========
 def detect_true_breakout(df, atr):
-    """Deteksi breakout dengan validasi ATR"""
     if len(df) < 20:
         return {'is_breakout': False, 'strength': 0, 'message': "Data tidak cukup"}
     current_price = df['Close'].iloc[-1]
@@ -310,11 +338,10 @@ def detect_true_breakout(df, atr):
     else:
         return {'is_breakout': False, 'strength': 0, 'message': "Tidak ada breakout"}
 
-# ========== DECISION ENGINE ==========
 def weighted_decision(indicators, mtf_alignment, trend_strength, weights):
     score = 0
     reasons = []
-    # TREND (45%)
+    # Trend
     if indicators['price'] > indicators['ema200']:
         score += weights['ema200']*1.5
         reasons.append(f"Harga > EMA200 (+{weights['ema200']*1.5:.1f})")
@@ -351,7 +378,7 @@ def weighted_decision(indicators, mtf_alignment, trend_strength, weights):
     elif trend_strength == "WEAK TREND":
         score -= weights['adx']*0.5
         reasons.append(f"ADX Lemah (-{weights['adx']*0.5:.1f})")
-    # VOLUME (25%)
+    # Volume
     if indicators['volume_status'] == "Tinggi":
         score += weights['volume_spike']*1.5
         reasons.append(f"Volume Tinggi (+{weights['volume_spike']*1.5:.1f})")
@@ -377,7 +404,7 @@ def weighted_decision(indicators, mtf_alignment, trend_strength, weights):
     elif cmf < 0:
         score -= weights['cmf']*0.5
         reasons.append(f"CMF negatif (-{weights['cmf']*0.5:.1f})")
-    # MOMENTUM (15%)
+    # Momentum
     rsi = indicators['rsi']
     if rsi < 30:
         score += weights['rsi']*1.5
@@ -395,7 +422,7 @@ def weighted_decision(indicators, mtf_alignment, trend_strength, weights):
     elif mfi > 80:
         score -= weights['rsi']*0.8
         reasons.append(f"MFI Overbought (-{weights['rsi']*0.8:.1f})")
-    # OSCILLATOR (15%)
+    # Oscillator
     if indicators['macd_hist'] > 0:
         score += weights['macd']*1.0
         reasons.append(f"MACD positif (+{weights['macd']:.1f})")
@@ -448,7 +475,6 @@ def weighted_decision(indicators, mtf_alignment, trend_strength, weights):
         signal, confidence, color = "HOLD", "LOW", "warning"
     return {'signal': signal, 'color': color, 'score': final_score, 'confidence': confidence, 'reasons': reasons}
 
-# ========== FUNGSI PENDUKUNG ==========
 def get_market_context():
     try:
         ihsg = yf.download("^JKSE", period="5d", progress=False, auto_adjust=False)['Close']
@@ -504,7 +530,6 @@ def run_backtest(df, weights, period_days=90):
     for i in range(30, len(df_test)):
         slice_df = df_test.iloc[:i+1]
         ind = get_latest_indicators(slice_df)
-        # MTF alignment dan trend strength dummy
         dec = weighted_decision(ind, 0, "MODERATE", weights)
         signals.append(dec['signal'])
     buy = signals.count("STRONG BUY") + signals.count("BUY")
@@ -592,7 +617,6 @@ def main():
         index=2
     )
     st.session_state.trading_mode = trading_mode
-    # Penjelasan mode
     mode_hints = {
         "Scalping (5-15 menit)": "⚡ Fokus: Volume + Momentum cepat (noise tinggi)",
         "Intraday (30 menit - 4 jam)": "📊 Fokus: Breakout + Trend harian",
@@ -613,17 +637,16 @@ def main():
         st.cache_data.clear()
         st.rerun()
     
-    # Parameter adaptif Supertrend
+    # Parameter adaptif
     if trading_mode == "Scalping (5-15 menit)":
         st_period, st_mult = 7, 2.5
     elif trading_mode == "Intraday (30 menit - 4 jam)":
         st_period, st_mult = 10, 3.0
     elif trading_mode == "Swing (Daily)":
         st_period, st_mult = 10, 3.0
-    else:  # Position
+    else:
         st_period, st_mult = 20, 3.0
     
-    # Load data utama
     with st.spinner(f"Memuat {ticker}..."):
         period = "2y" if trading_mode in ["Swing (Daily)", "Position (Weekly - Monthly)"] else "6mo"
         df_raw = yf.download(ticker, period=period, interval=timeframe, progress=False, auto_adjust=False)
@@ -635,7 +658,6 @@ def main():
     indicators = get_latest_indicators(df)
     price = indicators['price']
     
-    # MTF alignment (sederhana, bisa ditingkatkan)
     mtf_alignment = 0
     trend_strength = "MODERATE"
     decision = weighted_decision(indicators, mtf_alignment, trend_strength, weights)
@@ -644,11 +666,9 @@ def main():
     log_signal(ticker, decision['signal'], decision['score'], price)
     market_text, _ = get_market_context()
     
-    # Breakout detection
     breakout = detect_true_breakout(df, indicators['atr'])
     show_breakout_alert(breakout, st.session_state.last_breakout_notify_time)
     
-    # Weight factor based on trading mode
     weight_factors = {"Scalping": 0.7, "Intraday": 1.0, "Swing": 1.2, "Position": 1.3}
     mode_key = trading_mode.split()[0]
     wf = weight_factors.get(mode_key, 1.0)
@@ -656,17 +676,12 @@ def main():
     entry_eligible = adjusted_score >= 5
     entry_warning = 2 <= adjusted_score < 5
     
-    # Probabilitas
     bull_prob, bear_prob = calculate_probabilities(df)
-    
-    # Entry levels
     entry = get_entry_levels(df, indicators['atr'], price)
     
-    # ========== DASHBOARD UTAMA ==========
     st.title(f"🤖 {ticker}")
     st.caption(f"Mode: {trading_mode} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Baris 1: Harga, RSI, Supertrend, Volume Status
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("💰 Harga", f"Rp {price:,.0f}")
     col2.metric("📊 RSI", f"{indicators['rsi']:.1f}")
@@ -674,13 +689,11 @@ def main():
     col3.metric("📈 Supertrend", sup_dir, delta=f"Rp {indicators['supertrend_value']:,.0f}")
     col4.metric("📊 Volume", indicators['volume_status'])
     
-    # Baris 2: High 30d, Low 30d, ATR
     col1, col2, col3 = st.columns(3)
     col1.metric("📈 High 30d", f"Rp {indicators['high_30d']:,.0f}")
     col2.metric("📉 Low 30d", f"Rp {indicators['low_30d']:,.0f}")
     col3.metric("📊 ATR", f"Rp {indicators['atr']:,.0f}", delta=f"SL: Rp {indicators['atr']*1.5:,.0f}")
     
-    # Baris 3: Signal, Skor, Keyakinan
     col1, col2, col3 = st.columns(3)
     if decision['color'] == "success":
         col1.success(f"### 🟢 {decision['signal']}")
@@ -693,12 +706,10 @@ def main():
     col2.metric("🎯 Skor", f"{decision['score']:.1f}")
     col3.metric("🔒 Keyakinan", decision['confidence'])
     
-    # Baris 4: Smart Money (CMF + A/D) dan Breakout
     col1, col2, col3 = st.columns(3)
     cmf_val = indicators['cmf']
     cmf_text = "🟢 Akumulasi" if cmf_val > 0.15 else "🔴 Distribusi" if cmf_val < -0.15 else "⚪ Netral"
     col1.metric("💰 Smart Money (CMF)", cmf_text, delta=f"{cmf_val:.2f}")
-    # A/D Line (perubahan 5 hari)
     ad_change = 0
     if len(df) >= 6 and 'AD' in df.columns:
         ad_prev = df['AD'].iloc[-5]
@@ -708,32 +719,30 @@ def main():
     col2.metric("📈 A/D Line", ad_trend, delta=f"{ad_change:+.1f}% (5h)")
     col3.metric("🚀 Breakout", breakout['message'][:30], help=breakout['message'])
     
-    # Baris 5: Multi-timeframe (Daily, Weekly, Monthly)
+    # Multi-timeframe dengan safe loader
     with st.spinner("Memuat MTF..."):
-        df_daily = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
-        df_weekly = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=False)
-        df_monthly = yf.download(ticker, period="3y", interval="1mo", progress=False, auto_adjust=False)
-        if not df_daily.empty:
-            df_daily = calculate_all_indicators(df_daily, st_period, st_mult, trading_mode)
-            sig_daily = get_timeframe_signal(df_daily)
-        else:
-            sig_daily = "N/A"
-        if not df_weekly.empty:
-            df_weekly = calculate_all_indicators(df_weekly, st_period, st_mult, trading_mode)
-            sig_weekly = get_timeframe_signal(df_weekly)
-        else:
-            sig_weekly = "N/A"
-        if not df_monthly.empty:
-            df_monthly = calculate_all_indicators(df_monthly, st_period, st_mult, trading_mode)
-            sig_monthly = get_timeframe_signal(df_monthly)
-        else:
-            sig_monthly = "N/A"
+        def safe_load(ticker, period, interval):
+            try:
+                d = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False)
+                if isinstance(d.columns, pd.MultiIndex):
+                    d.columns = d.columns.get_level_values(0)
+                if d.empty or len(d) < 30:
+                    return pd.DataFrame()
+                return calculate_all_indicators(d, st_period, st_mult, trading_mode)
+            except:
+                return pd.DataFrame()
+        df_daily = safe_load(ticker, "1y", "1d")
+        df_weekly = safe_load(ticker, "2y", "1wk")
+        df_monthly = safe_load(ticker, "3y", "1mo")
+        sig_daily = get_timeframe_signal(df_daily) if not df_daily.empty else "N/A"
+        sig_weekly = get_timeframe_signal(df_weekly) if not df_weekly.empty else "N/A"
+        sig_monthly = get_timeframe_signal(df_monthly) if not df_monthly.empty else "N/A"
+    
     col1, col2, col3 = st.columns(3)
     col1.metric("Daily", sig_daily)
     col2.metric("Weekly", sig_weekly)
     col3.metric("Monthly", sig_monthly)
     
-    # Baris 6: Level Entry, IHSG, Probabilitas
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("🎯 Buy Entry", f"Rp {entry['buy_entry']:,.0f}")
     col2.metric("🛑 Stop Loss", f"Rp {entry['stop_loss']:,.0f}", delta_color="inverse")
@@ -743,7 +752,6 @@ def main():
     col5.metric("📈 Bullish Prob.", f"{bull_prob:.0f}%")
     col6.metric("📉 Bearish Prob.", f"{bear_prob:.0f}%")
     
-    # Baris 7: Keputusan Final Entry
     if entry_eligible:
         st.success(f"🟢 **ENTRY LAYAK** (Adjusted Score: {adjusted_score:.1f} | Mode: {trading_mode})")
         st.write("📌 Saran: Entry sesuai level, gunakan stop loss.")
@@ -754,11 +762,9 @@ def main():
         st.error(f"🔴 **TIDAK LAYAK ENTRY** (Adjusted Score: {adjusted_score:.1f})")
         st.write("📌 Saran: Tunggu atau cari saham lain.")
     
-    # Interpretasi sinyal dalam expander
     with st.expander("📖 Arti Sinyal Saat Ini"):
         st.markdown(get_signal_interpretation(decision['signal']))
     
-    # ========== EXPANDER UNTUK DETAIL ==========
     with st.expander("📋 Detail Analisis & Kontribusi Semua Indikator"):
         for reason in decision['reasons']:
             st.write(f"- {reason}")
