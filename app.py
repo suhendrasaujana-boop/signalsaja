@@ -32,11 +32,12 @@ if 'last_breakout_notify_time' not in st.session_state:
 if 'trading_mode' not in st.session_state:
     st.session_state.trading_mode = "Swing (Daily)"
 if 'custom_weights' not in st.session_state:
+    # Bobot ini hanya sebagai cadangan, skema baru lebih mengutamakan regime
     st.session_state.custom_weights = {
         'trend': 2.0, 'momentum': 1.5, 'volume': 1.5, 'smart_money': 1.5, 'structure': 1.0
     }
 
-# ========== FUNGSI INDIKATOR (tetap) ==========
+# ========== FUNGSI INDIKATOR ==========
 def calculate_supertrend(df, period=10, multiplier=3.0):
     high, low, close = df['High'], df['Low'], df['Close']
     atr = ta.volatility.average_true_range(high, low, close, window=period)
@@ -338,12 +339,13 @@ def get_latest_indicators(df):
         'swing_high': swing_high
     }
 
-# ========== DECISION ENGINE (clean version, hanya RSI untuk momentum) ==========
-def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
+# ========== DECISION ENGINE FINAL (CONDITIONAL SCORING) ==========
+def weighted_decision_final(indicators, mtf_alignment, regime, weights):
     score = 0
     reasons = []
-    
-    # Trend group (sama seperti sebelumnya)
+
+    # Hitung skor per grup (normalized antara -1 dan 1)
+    # --- Trend group ---
     trend_score = 0
     if indicators['price'] > indicators['ema200']:
         trend_score += 1.5
@@ -361,25 +363,21 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
         trend_score += 1.0
     else:
         trend_score -= 1.0
-    trend_score = trend_score / 4.0
-    score += trend_score * weights['trend']
-    reasons.append(f"Trend: {trend_score:.2f} (bobot {weights['trend']})")
+    trend_score = trend_score / 4.0   # range -1..1
 
-    # Momentum group - HANYA RSI (soft disable stoch, willr, cci, mfi)
+    # --- Momentum group (hanya RSI) ---
     rsi = indicators['rsi']
     mom_score = 0.0
     if rsi < 30:
         mom_score = 1.0
     elif rsi > 70:
         mom_score = -1.0
-    elif rsi < 50:
+    elif rsi < 45:
         mom_score = 0.3
-    elif rsi > 50:
+    elif rsi > 55:
         mom_score = -0.3
-    score += mom_score * weights['momentum']
-    reasons.append(f"Momentum (RSI={rsi:.0f}): {mom_score:.2f} (bobot {weights['momentum']})")
 
-    # Volume group
+    # --- Volume group ---
     vol_score = 0
     if indicators['volume_status'] == "Tinggi":
         vol_score += 1.0
@@ -390,10 +388,8 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
     else:
         vol_score -= 0.5
     vol_score = vol_score / 2.0
-    score += vol_score * weights['volume']
-    reasons.append(f"Volume: {vol_score:.2f} (bobot {weights['volume']})")
 
-    # Smart Money group (hanya CMF, AD diabaikan)
+    # --- Smart Money (CMF only) ---
     smart_score = 0
     cmf = indicators['cmf']
     if cmf > 0.15:
@@ -404,11 +400,8 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
         smart_score = 0.5
     elif cmf < 0:
         smart_score = -0.5
-    # AD tidak dipakai lagi
-    score += smart_score * weights['smart_money']
-    reasons.append(f"Smart Money (CMF={cmf:.2f}): {smart_score:.2f} (bobot {weights['smart_money']})")
 
-    # Structure
+    # --- Structure (swing points) ---
     struct_score = 0
     price = indicators['price']
     swing_low = indicators['swing_low']
@@ -417,25 +410,34 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
         struct_score = 1.0
     elif price < swing_low:
         struct_score = -1.0
-    score += struct_score * weights['structure']
-    reasons.append(f"Structure: {struct_score:.2f} (bobot {weights['structure']})")
 
-    # MTF alignment
+    # --- Conditional scoring berdasarkan regime ---
+    if regime == "TREND":
+        # Trend mode: trend dan struktur dominan
+        score = (trend_score * 2.5) + (struct_score * 1.5) + (vol_score * 1.0) + (smart_score * 0.8)
+        # Momentum hanya fine-tune
+        if mom_score < -0.5:   # overbought saat uptrend -> kurangi
+            score -= 0.5
+        elif mom_score > 0.5:  # oversold saat uptrend -> tambah
+            score += 0.3
+        reasons.append(f"TREND MODE: trend={trend_score:.2f}, struct={struct_score:.2f}, mom_adj={mom_score:.2f}")
+    else:  # SIDEWAYS
+        # Sideways: mean reversion, momentum dominan
+        score = (mom_score * 2.0) + (smart_score * 1.0) + (vol_score * 0.5) + (struct_score * 0.5)
+        # Tambahan: support/resistance
+        if price <= indicators['support'] and mom_score > 0:
+            score += 1.0
+        elif price >= indicators['resistance'] and mom_score < 0:
+            score -= 1.0
+        reasons.append(f"SIDEWAYS MODE: mom={mom_score:.2f}, smart={smart_score:.2f}")
+
+    # --- MTF alignment (sama untuk kedua regime) ---
     score += mtf_alignment * 1.0
     reasons.append(f"MTF Alignment: {mtf_alignment:.2f}")
 
-    # Regime adjustment
-    if regime == "TREND":
-        score += trend_score * 0.5
-        reasons.append("Regime: TREND -> bonus trend")
-    else:
-        if trend_score > 0:
-            score -= trend_score * 0.3
-        if mom_score > 0:
-            score += mom_score * 0.3
-        reasons.append("Regime: SIDEWAYS -> adjust")
-
+    # Normalisasi ke -10..10 (faktor 2 agar sensitif)
     final_score = max(-10, min(10, score * 2.0))
+
     if final_score >= 6:
         signal, confidence, color = "STRONG BUY", "HIGH", "success"
     elif final_score >= 3:
@@ -446,9 +448,10 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
         signal, confidence, color = "SELL", "LOW", "warning"
     else:
         signal, confidence, color = "HOLD", "LOW", "warning"
+
     return {'signal': signal, 'color': color, 'score': final_score, 'confidence': confidence, 'reasons': reasons}
 
-# ========== ENTRY & STOP LOSS ==========
+# ========== ENTRY & STOP LOSS BERBASIS STRUKTUR ==========
 def get_entry_levels_advanced(df, indicators, regime):
     price = indicators['price']
     atr = indicators['atr']
@@ -477,7 +480,7 @@ def get_entry_levels_advanced(df, indicators, regime):
         'target': target
     }
 
-# ========== BACKTEST ==========
+# ========== BACKTEST VALID DENGAN EQUITY CURVE ==========
 def run_backtest_advanced(df, weights, regime_func, period_days=180):
     if df.empty or len(df) < period_days:
         return None
@@ -491,7 +494,7 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180):
         slice_df = df_test.iloc[:i+1]
         ind = get_latest_indicators(slice_df)
         regime = regime_func(slice_df)
-        dec = weighted_decision_v2(ind, 0, regime, weights)
+        dec = weighted_decision_final(ind, 0, regime, weights)   # mtf di backtest diabaikan
         if dec['signal'] in ['BUY', 'STRONG BUY'] and len(positions) == 0:
             entry_price = ind['price']
             stop_loss = ind['swing_low'] - ind['atr']*0.5
@@ -513,7 +516,7 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180):
         return None
     win_trades = [t for t in trades if t['pnl'] > 0]
     winrate = len(win_trades)/len(trades)*100 if trades else 0
-    profit_factor = sum(t['pnl'] for t in trades if t['pnl']>0) / abs(sum(t['pnl'] for t in trades if t['pnl']<0)) if sum(t['pnl'] for t in trades if t['pnl']<0) !=0 else 0
+    profit_factor = sum(t['pnl'] for t in trades if t['pnl']>0) / abs(sum(t['pnl'] for t in trades if t['pnl']<0)) if sum(t['pnl'] for t in trades if t['pnl']<0) != 0 else 0
     max_drawdown = (max(equity) - min(equity)) / max(equity) * 100 if max(equity) > 0 else 0
     return {
         'trades': len(trades),
@@ -524,7 +527,7 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180):
         'equity': equity
     }
 
-# ========== FUNGSI LAIN ==========
+# ========== FUNGSI LAIN (market context, UI, dll) ==========
 def get_market_context():
     try:
         ihsg = yf.download("^JKSE", period="5d", progress=False, auto_adjust=False)['Close']
@@ -651,7 +654,6 @@ def main():
         ticker += '.JK'
     timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1wk", "1mo"], index=0)
     
-    # Mode trading
     trading_mode = st.sidebar.selectbox(
         "Mode Trading",
         ["Scalping (5-15 menit)", "Intraday (30 menit - 4 jam)", "Swing (Daily)", "Position (Weekly - Monthly)"],
@@ -670,11 +672,12 @@ def main():
         st_period, st_mult = 10, 3.0
     else:
         st_period, st_mult = 20, 3.0
-    
-    # Toggle UI mode
+
     ui_mode = st.sidebar.selectbox("Mode Tampilan", ["Simple (Recommended)", "Advanced (Full Indicators)"], index=0)
-    
-    with st.sidebar.expander("⚙️ Bobot Indikator (Grup)"):
+
+    # Bobot tidak lagi dipakai secara langsung oleh decision engine (karena sudah conditional),
+    # tapi kita tetap tampilkan untuk keperluan edukasi atau eksperimen
+    with st.sidebar.expander("⚙️ Bobot Indikator (tidak mempengaruhi keputusan utama)"):
         weights = {}
         weights['trend'] = st.slider("Trend (EMA, Supertrend, PSAR)", 0.0, 3.0, st.session_state.custom_weights.get('trend', 2.0), 0.1)
         weights['momentum'] = st.slider("Momentum (RSI)", 0.0, 3.0, st.session_state.custom_weights.get('momentum', 1.5), 0.1)
@@ -684,24 +687,25 @@ def main():
         if st.button("Simpan Bobot"):
             st.session_state.custom_weights = weights
     weights = st.session_state.custom_weights.copy()
-    
+
     if st.sidebar.button("🔄 Refresh Data"):
         st.cache_data.clear()
         st.rerun()
-    
+
     with st.spinner(f"Memuat {ticker}..."):
         period = "2y" if trading_mode == "Position (Weekly - Monthly)" else "1y"
         df_raw = yf.download(ticker, period=period, interval=timeframe, progress=False, auto_adjust=False)
     if df_raw.empty:
         st.error(f"Data {ticker} tidak tersedia")
         st.stop()
-    
+
     df = calculate_all_indicators(df_raw, st_period, st_mult, trading_mode)
     indicators = get_latest_indicators(df)
     price = indicators['price']
-    
+
     regime = detect_market_regime(df)
-    
+
+    # MTF alignment
     def safe_load(ticker, period, interval):
         try:
             d = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False)
@@ -716,38 +720,37 @@ def main():
     df_weekly_mtf = safe_load(ticker, "2y", "1wk")
     df_monthly_mtf = safe_load(ticker, "3y", "1mo")
     mtf_alignment = get_mtf_alignment(df_daily_mtf, df_weekly_mtf, df_monthly_mtf)
-    
-    decision = weighted_decision_v2(indicators, mtf_alignment, regime, weights)
+
+    decision = weighted_decision_final(indicators, mtf_alignment, regime, weights)
     show_toast_if_changed(decision['signal'], st.session_state.last_signal)
     st.session_state.last_signal = decision['signal']
     log_signal(ticker, decision['signal'], decision['score'], price)
     market_text, _ = get_market_context()
-    
+
     breakout = detect_true_breakout(df, indicators['atr'])
     show_breakout_alert(breakout, st.session_state.last_breakout_notify_time)
-    
+
     entry_levels = get_entry_levels_advanced(df, indicators, regime)
     entry_eligible = decision['score'] >= 5
     entry_warning = 2 <= decision['score'] < 5
-    
+
     bull_prob, bear_prob = calculate_probabilities(df)
-    
+
     st.title(f"🤖 {ticker}")
     st.caption(f"Mode: {trading_mode} | Regime: {regime} | MTF Alignment: {mtf_alignment:.2f}")
-    
-    # ========== METRIK UTAMA (selalu tampil) ==========
+
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("💰 Harga", f"Rp {price:,.0f}")
     col2.metric("📊 RSI", f"{indicators['rsi']:.1f}")
     sup_dir = "🟢 UPTREND" if indicators['supertrend_dir'] == 1 else "🔴 DOWNTREND"
     col3.metric("📈 Supertrend", sup_dir, delta=f"Rp {indicators['supertrend_value']:,.0f}")
     col4.metric("📊 Volume", indicators['volume_status'])
-    
+
     col1, col2, col3 = st.columns(3)
     col1.metric("📈 High 30d", f"Rp {indicators['high_30d']:,.0f}")
     col2.metric("📉 Low 30d", f"Rp {indicators['low_30d']:,.0f}")
     col3.metric("📊 ATR", f"Rp {indicators['atr']:,.0f}")
-    
+
     col1, col2, col3 = st.columns(3)
     if decision['color'] == "success":
         col1.success(f"### 🟢 {decision['signal']}")
@@ -759,24 +762,23 @@ def main():
         col1.warning(f"### 🟡 {decision['signal']}")
     col2.metric("🎯 Skor", f"{decision['score']:.1f}")
     col3.metric("🔒 Keyakinan", decision['confidence'])
-    
+
     col1, col2, col3 = st.columns(3)
     cmf_val = indicators['cmf']
     cmf_text = "🟢 Akumulasi" if cmf_val > 0.15 else "🔴 Distribusi" if cmf_val < -0.15 else "⚪ Netral"
     col1.metric("💰 Smart Money (CMF)", cmf_text, delta=f"{cmf_val:.2f}")
     col2.metric("📈 Swing Low", f"Rp {indicators['swing_low']:,.0f}")
     col3.metric("📉 Swing High", f"Rp {indicators['swing_high']:,.0f}")
-    
+
     col1, col2, col3 = st.columns(3)
     col1.metric("🎯 Buy Entry", f"Rp {entry_levels['buy_entry']:,.0f}")
     col2.metric("🛑 Stop Loss", f"Rp {entry_levels['stop_loss']:,.0f}")
     col3.metric("🎯 Target", f"Rp {entry_levels['target']:,.0f}")
-    
+
     col1, col2 = st.columns(2)
     col1.metric("🌍 IHSG", market_text[:20], help=market_text)
     col2.metric("📈 Bullish Prob.", f"{bull_prob:.0f}%")
-    
-    # ========== INDIKATOR TAMBAHAN (hanya jika mode Advanced) ==========
+
     if ui_mode == "Advanced (Full Indicators)":
         st.markdown("---")
         st.caption("📊 Indikator Lanjutan (Mode Advanced)")
@@ -791,22 +793,22 @@ def main():
         adv_cols2[1].metric("Elder Bull", f"{indicators['elder_bull']:.0f}")
         adv_cols2[2].metric("Elder Bear", f"{indicators['elder_bear']:.0f}")
         adv_cols2[3].metric("GMMA Spread", f"{indicators['gmma_spread']:.0f}")
-    
+
     if entry_eligible:
         st.success(f"🟢 **ENTRY LAYAK** (Skor: {decision['score']:.1f} | Regime: {regime})")
     elif entry_warning:
         st.warning(f"🟡 **ENTRY HATI-HATI** (Skor: {decision['score']:.1f})")
     else:
         st.error(f"🔴 **TIDAK LAYAK ENTRY** (Skor: {decision['score']:.1f})")
-    
+
     with st.expander("📖 Arti Sinyal"):
         st.markdown(get_signal_interpretation(decision['signal']))
-    
+
     with st.expander("📋 Detail Analisis"):
         for reason in decision['reasons']:
             st.write(f"- {reason}")
         st.markdown(f"**Total Skor: {decision['score']}**")
-    
+
     col_left, col_right = st.columns(2)
     with col_left:
         with st.expander("📊 Backtest (6 bulan) - Simulasi Sederhana"):
@@ -829,7 +831,7 @@ def main():
                 st.download_button("📥 Ekspor CSV", csv, "signal_history.csv", "text/csv")
             else:
                 st.info("Belum ada sinyal")
-    
+
     with st.expander("📐 Position Sizing"):
         capital = st.number_input("Modal (Rp)", value=100_000_000.0, step=10_000_000.0)
         risk_percent = st.number_input("Risiko per trade (%)", value=2.0, step=0.5)
@@ -838,7 +840,7 @@ def main():
             st.write(f"Jumlah saham: {shares:,} lembar")
             st.write(f"Nilai posisi: Rp {pos_value:,.0f} ({pos_value/capital*100:.1f}% dari modal)")
             st.write(f"Risiko stop loss: Rp {risk_amt:,.0f} ({risk_percent:.1f}%)")
-    
+
     st.caption("⚠️ Edukasi saja, bukan rekomendasi investasi. Backtest hanya simulasi sederhana.")
     gc.collect()
 
