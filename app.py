@@ -347,7 +347,6 @@ def get_latest_indicators(df):
 def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
     score = 0
     reasons = []
-    # Group indikator untuk menghindari double counting
     # Trend group
     trend_score = 0
     if indicators['price'] > indicators['ema200']:
@@ -366,7 +365,7 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
         trend_score += 1.0
     else:
         trend_score -= 1.0
-    trend_score = trend_score / 4.0  # normalisasi
+    trend_score = trend_score / 4.0
     score += trend_score * weights['trend']
     reasons.append(f"Trend: {trend_score:.2f} (bobot {weights['trend']})")
 
@@ -435,7 +434,7 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
     score += smart_score * weights['smart_money']
     reasons.append(f"Smart Money: {smart_score:.2f} (bobot {weights['smart_money']})")
 
-    # Structure (swing points, breakout)
+    # Structure
     struct_score = 0
     price = indicators['price']
     swing_low = indicators['swing_low']
@@ -444,21 +443,18 @@ def weighted_decision_v2(indicators, mtf_alignment, regime, weights):
         struct_score += 1.0
     elif price < swing_low:
         struct_score -= 1.0
-    struct_score = struct_score
     score += struct_score * weights['structure']
     reasons.append(f"Structure: {struct_score:.2f} (bobot {weights['structure']})")
 
-    # MTF alignment (sudah dihitung dari luar)
+    # MTF alignment
     score += mtf_alignment * 1.0
     reasons.append(f"MTF Alignment: {mtf_alignment:.2f}")
 
     # Regime adjustment
     if regime == "TREND":
-        # Dalam trend, beri bonus pada trend_score
         score += trend_score * 0.5
         reasons.append("Regime: TREND -> bonus trend")
     else:
-        # Sideways, kurangi trend dan perkuat momentum (mean reversion)
         if trend_score > 0:
             score -= trend_score * 0.3
         if mom_score > 0:
@@ -489,17 +485,15 @@ def get_entry_levels_advanced(df, indicators, regime):
     resistance = indicators['resistance']
     
     if regime == "TREND":
-        # Trend following: entry on pullback ke EMA20 atau breakout swing high
         if price > ema20 and price > swing_high:
-            buy_entry = price + atr*0.2  # breakout agresif
+            buy_entry = price + atr*0.2
             stop_loss = swing_low - atr*0.5
             target = resistance if resistance > price else price + atr*3
         else:
-            buy_entry = ema20  # pullback
+            buy_entry = ema20
             stop_loss = swing_low - atr*0.5
             target = swing_high + atr
     else:
-        # Sideways: mean reversion di support/resistance
         buy_entry = support + atr*0.3
         stop_loss = swing_low - atr*0.5
         target = resistance - atr*0.5
@@ -523,9 +517,7 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180):
         slice_df = df_test.iloc[:i+1]
         ind = get_latest_indicators(slice_df)
         regime = regime_func(slice_df)
-        # Sederhana: hitung decision setiap hari, jika sinyal BUY/STRONG BUY maka beli jika tidak ada posisi
-        # Ini hanya simulasi kasar untuk demo
-        dec = weighted_decision_v2(ind, 0, regime, weights)  # mtf alignment di backtest diabaikan
+        dec = weighted_decision_v2(ind, 0, regime, weights)  # mtf di backtest diabaikan
         if dec['signal'] in ['BUY', 'STRONG BUY'] and len(positions) == 0:
             entry_price = ind['price']
             stop_loss = ind['swing_low'] - ind['atr']*0.5
@@ -535,7 +527,6 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180):
             pos = positions[0]
             current_price = ind['price']
             if current_price <= pos['stop'] or current_price >= pos['target']:
-                # exit
                 exit_price = current_price
                 pnl = (exit_price - pos['entry']) / pos['entry'] * balance
                 balance += pnl
@@ -559,7 +550,7 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180):
         'equity': equity
     }
 
-# ========== FUNGSI LAIN (get_market_context, show_toast, dll) ==========
+# ========== FUNGSI LAIN ==========
 def get_market_context():
     try:
         ihsg = yf.download("^JKSE", period="5d", progress=False, auto_adjust=False)['Close']
@@ -685,12 +676,28 @@ def main():
     if not ticker.endswith('.JK') and not ticker.startswith('^'):
         ticker += '.JK'
     timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1wk", "1mo"], index=0)
+    
+    # Mode trading dengan 4 opsi
     trading_mode = st.sidebar.selectbox(
         "Mode Trading",
-        ["Swing (Daily)", "Position (Weekly - Monthly)"],
-        index=0
+        ["Scalping (5-15 menit)", "Intraday (30 menit - 4 jam)", "Swing (Daily)", "Position (Weekly - Monthly)"],
+        index=2
     )
     st.session_state.trading_mode = trading_mode
+    
+    # Warning untuk mode scalping/intraday
+    if trading_mode in ["Scalping (5-15 menit)", "Intraday (30 menit - 4 jam)"]:
+        st.sidebar.warning("⚠️ Mode ini menggunakan data **daily** karena yfinance tidak menyediakan data menit yang stabil. Sinyal lebih cocok untuk trading harian, bukan real-time menit.")
+    
+    # Parameter adaptif Supertrend
+    if trading_mode == "Scalping (5-15 menit)":
+        st_period, st_mult = 7, 2.5
+    elif trading_mode == "Intraday (30 menit - 4 jam)":
+        st_period, st_mult = 8, 2.7
+    elif trading_mode == "Swing (Daily)":
+        st_period, st_mult = 10, 3.0
+    else:  # Position
+        st_period, st_mult = 20, 3.0
     
     with st.sidebar.expander("⚙️ Bobot Indikator (Grup)"):
         weights = {}
@@ -707,11 +714,6 @@ def main():
         st.cache_data.clear()
         st.rerun()
     
-    if trading_mode == "Swing (Daily)":
-        st_period, st_mult = 10, 3.0
-    else:
-        st_period, st_mult = 20, 3.0
-    
     with st.spinner(f"Memuat {ticker}..."):
         period = "2y" if trading_mode == "Position (Weekly - Monthly)" else "1y"
         df_raw = yf.download(ticker, period=period, interval=timeframe, progress=False, auto_adjust=False)
@@ -725,16 +727,21 @@ def main():
     
     # Market regime
     regime = detect_market_regime(df)
-    # MTF alignment
-    df_daily_mtf = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=False)
-    df_weekly_mtf = yf.download(ticker, period="2y", interval="1wk", progress=False, auto_adjust=False)
-    df_monthly_mtf = yf.download(ticker, period="3y", interval="1mo", progress=False, auto_adjust=False)
-    if not df_daily_mtf.empty:
-        df_daily_mtf = calculate_all_indicators(df_daily_mtf, st_period, st_mult, trading_mode)
-    if not df_weekly_mtf.empty:
-        df_weekly_mtf = calculate_all_indicators(df_weekly_mtf, st_period, st_mult, trading_mode)
-    if not df_monthly_mtf.empty:
-        df_monthly_mtf = calculate_all_indicators(df_monthly_mtf, st_period, st_mult, trading_mode)
+    
+    # MTF alignment (dengan loading aman)
+    def safe_load(ticker, period, interval):
+        try:
+            d = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False)
+            if isinstance(d.columns, pd.MultiIndex):
+                d.columns = d.columns.get_level_values(0)
+            if d.empty or len(d) < 30:
+                return pd.DataFrame()
+            return calculate_all_indicators(d, st_period, st_mult, trading_mode)
+        except:
+            return pd.DataFrame()
+    df_daily_mtf = safe_load(ticker, "1y", "1d")
+    df_weekly_mtf = safe_load(ticker, "2y", "1wk")
+    df_monthly_mtf = safe_load(ticker, "3y", "1mo")
     mtf_alignment = get_mtf_alignment(df_daily_mtf, df_weekly_mtf, df_monthly_mtf)
     
     decision = weighted_decision_v2(indicators, mtf_alignment, regime, weights)
