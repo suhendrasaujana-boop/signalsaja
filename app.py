@@ -6,7 +6,6 @@ import ta
 from datetime import datetime
 import warnings
 import gc
-from yahooquery import Ticker  # fallback untuk IHSG
 
 warnings.filterwarnings("ignore")
 
@@ -199,7 +198,7 @@ def detect_market_regime(df, adx_threshold=25):
 
 
 def get_swing_points(df, lookback=5):
-    """FIXED: center=False agar tidak menghasilkan NaN"""
+    """FIXED: Tidak menghasilkan NaN"""
     if len(df) < lookback * 2:
         return df["Low"].iloc[-1], df["High"].iloc[-1]
     low = df["Low"]
@@ -248,7 +247,7 @@ def get_mtf_alignment(df_daily, df_weekly, df_monthly):
     return weighted_sum / total_weight
 
 
-# ====================== INDIKATOR UTAMA (optimized cache) ======================
+# ====================== INDIKATOR UTAMA ======================
 @st.cache_data(ttl=CACHE_TTL)
 def calculate_all_indicators(df, st_period=10, st_mult=3.0, mode="Swing (Daily)"):
     if isinstance(df.columns, pd.MultiIndex):
@@ -394,7 +393,7 @@ def calculate_all_indicators(df, st_period=10, st_mult=3.0, mode="Swing (Daily)"
         df["GMMA_Spread"] = 0.0
 
     df = df.ffill().fillna(0)
-    # Hanya simpan kolom penting untuk cache (menghemat memori)
+    # Hanya simpan kolom penting
     keep_cols = ["Close","High","Low","Volume","SMA20","SMA50","EMA200","RSI","MACD_Hist",
                  "Stoch_K","Stoch_D","ATR","Volume_MA","support","resistance","CMF",
                  "ST_Supertrend","ST_Dir","PSAR_Dir","OBV","OBV_MA","MFI","Williams_R","CCI",
@@ -467,9 +466,8 @@ def get_latest_indicators(df):
     }
 
 
-# ====================== DECISION ENGINE (dengan sigmoid smoothing) ======================
+# ====================== DECISION ENGINE ======================
 def sigmoid_scaled(x, slope=1.0, center=0.0, scale=10.0):
-    """Memetakan nilai x ke range -scale..scale dengan kurva sigmoid halus"""
     return scale * (2 / (1 + np.exp(-slope * (x - center))) - 1)
 
 
@@ -480,7 +478,7 @@ def weighted_decision_final(indicators, mtf_alignment, regime, weights):
     w_smart = weights.get("smart_money", 1.5)
     w_struct = weights.get("structure", 1.0)
 
-    # --- Trend group ---
+    # Trend
     trend_score = 0.0
     if indicators["price"] > indicators["ema200"]:
         trend_score += 1.5
@@ -498,9 +496,9 @@ def weighted_decision_final(indicators, mtf_alignment, regime, weights):
         trend_score += 1.0
     else:
         trend_score -= 1.0
-    trend_score = trend_score / 4.0  # range -1..1
+    trend_score = trend_score / 4.0
 
-    # --- Momentum group ---
+    # Momentum
     rsi = indicators["rsi"]
     mom_score = 0.0
     if rsi < 30:
@@ -517,7 +515,7 @@ def weighted_decision_final(indicators, mtf_alignment, regime, weights):
         mom_score -= 0.5
     mom_score = max(-1.0, min(1.0, mom_score / 1.5))
 
-    # --- Volume group ---
+    # Volume
     vol_score = 0.0
     if indicators["volume_status"] == "Tinggi":
         vol_score += 1.0
@@ -529,7 +527,7 @@ def weighted_decision_final(indicators, mtf_alignment, regime, weights):
         vol_score -= 0.5
     vol_score = vol_score / 2.0
 
-    # --- Smart Money (CMF) ---
+    # Smart Money
     cmf = indicators["cmf"]
     smart_score = 0.0
     if cmf > 0.15:
@@ -540,11 +538,9 @@ def weighted_decision_final(indicators, mtf_alignment, regime, weights):
         smart_score = 0.5
     elif cmf < 0:
         smart_score = -0.5
-    else:
-        smart_score = 0.0
     smart_score = max(-1.0, min(1.0, smart_score / 1.5))
 
-    # --- Structure ---
+    # Structure
     price = indicators["price"]
     swing_low = indicators["swing_low"]
     swing_high = indicators["swing_high"]
@@ -556,18 +552,11 @@ def weighted_decision_final(indicators, mtf_alignment, regime, weights):
             struct_score = 0.8
     elif price < swing_low:
         struct_score = -1.0
-    else:
-        struct_score = 0.0
 
-    # --- GMMA Spread (enhancement) ---
-    gmma_spread = indicators["gmma_spread"]
-    gmma_contrib = 0.0
-    if gmma_spread > 0:
-        gmma_contrib = 0.2
-    elif gmma_spread < 0:
-        gmma_contrib = -0.2
+    # GMMA Spread
+    gmma_contrib = 0.2 if indicators["gmma_spread"] > 0 else (-0.2 if indicators["gmma_spread"] < 0 else 0.0)
 
-    # --- Conditional scoring ---
+    # Conditional
     reasons = []
     if regime == "TREND":
         raw_score = (trend_score * w_trend) + (struct_score * w_struct) + (vol_score * w_volume * 0.5) + (smart_score * w_smart * 0.5) + gmma_contrib
@@ -588,7 +577,6 @@ def weighted_decision_final(indicators, mtf_alignment, regime, weights):
     reasons.append(f"MTF Alignment: {mtf_alignment:.2f}")
     reasons.append(f"GMMA Spread: {gmma_contrib:.2f}")
 
-    # Smoothing dengan sigmoid agar tidak ekstrem
     final_score = sigmoid_scaled(raw_score, slope=0.8, scale=10.0)
 
     if final_score >= 6:
@@ -602,16 +590,10 @@ def weighted_decision_final(indicators, mtf_alignment, regime, weights):
     else:
         signal, confidence, color = "HOLD", "LOW", "warning"
 
-    return {
-        "signal": signal,
-        "color": color,
-        "score": final_score,
-        "confidence": confidence,
-        "reasons": reasons,
-    }
+    return {"signal": signal, "color": color, "score": final_score, "confidence": confidence, "reasons": reasons}
 
 
-# ====================== ENTRY & STOP LOSS (dengan validasi) ======================
+# ====================== ENTRY & STOP LOSS ======================
 def get_entry_levels_advanced(df, indicators, regime):
     price = indicators["price"]
     atr = indicators["atr"]
@@ -635,7 +617,6 @@ def get_entry_levels_advanced(df, indicators, regime):
         stop_loss = swing_low - atr * 0.5
         target = resistance - atr * 0.5
 
-    # Validasi: stop loss tidak boleh >= entry price
     if stop_loss >= buy_entry:
         stop_loss = buy_entry - 2 * atr
         if stop_loss < 0:
@@ -644,12 +625,12 @@ def get_entry_levels_advanced(df, indicators, regime):
     return {"buy_entry": buy_entry, "stop_loss": stop_loss, "target": target}
 
 
-# ====================== BACKTEST DENGAN FEE & LOT 100 ======================
+# ====================== BACKTEST ======================
 def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_trade=0.02):
     if df.empty or len(df) < period_days:
         return None
     df_test = df.tail(period_days).copy()
-    balance = 100_000_000  # modal awal
+    balance = 100_000_000
     positions = []
     equity = [balance]
     trades = []
@@ -674,17 +655,9 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
                 price_risk = entry_price - stop_loss
                 if price_risk > 0:
                     shares = int(risk_amount / price_risk)
-                    # Bulatkan ke lot 100 saham
                     shares = (shares // 100) * 100
                     if shares > 0:
-                        positions.append(
-                            {
-                                "entry": entry_price,
-                                "stop": stop_loss,
-                                "target": target,
-                                "shares": shares,
-                            }
-                        )
+                        positions.append({"entry": entry_price, "stop": stop_loss, "target": target, "shares": shares})
         elif len(positions) > 0:
             pos = positions[0]
             current_price = ind["price"]
@@ -694,14 +667,7 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
                 fee = (pos["entry"] * pos["shares"] + exit_price * pos["shares"]) * TRADING_FEE
                 pnl = gross_pnl - fee
                 balance += pnl
-                trades.append(
-                    {
-                        "entry": pos["entry"],
-                        "exit": exit_price,
-                        "pnl": pnl,
-                        "shares": pos["shares"],
-                    }
-                )
+                trades.append({"entry": pos["entry"], "exit": exit_price, "pnl": pnl, "shares": pos["shares"]})
                 positions.pop()
             equity.append(balance)
         else:
@@ -709,13 +675,11 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
 
     if len(trades) == 0:
         return None
-
     win_trades = [t for t in trades if t["pnl"] > 0]
-    winrate = len(win_trades) / len(trades) * 100 if trades else 0
+    winrate = len(win_trades) / len(trades) * 100
     total_profit = sum(t["pnl"] for t in trades if t["pnl"] > 0)
     total_loss = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
     profit_factor = total_profit / total_loss if total_loss != 0 else float("inf")
-
     peak = equity[0]
     max_dd = 0.0
     for val in equity:
@@ -725,24 +689,16 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
             dd = (peak - val) / peak * 100
             if dd > max_dd:
                 max_dd = dd
-
-    return {
-        "trades": len(trades),
-        "winrate": winrate,
-        "profit_factor": profit_factor,
-        "max_drawdown": max_dd,
-        "final_balance": balance,
-        "equity": equity,
-    }
+    return {"trades": len(trades), "winrate": winrate, "profit_factor": profit_factor, "max_drawdown": max_dd, "final_balance": balance, "equity": equity}
 
 
-# ====================== FUNGSI LAIN (IHSG dengan fallback) ======================
+# ====================== FUNGSI LAIN ======================
 def get_market_context():
+    """Hanya menggunakan yfinance, tanpa yahooquery"""
     try:
-        # Coba yfinance dulu
         ihsg = yf.download("^JKSE", period="5d", progress=False, auto_adjust=False)
         if ihsg.empty or "Close" not in ihsg.columns:
-            raise ValueError("yfinance kosong")
+            return "⚠️ IHSG tidak tersedia", 0
         ihsg_close = ihsg["Close"]
         if len(ihsg_close) >= 3:
             last_3 = ihsg_close.iloc[-3:].pct_change().dropna()
@@ -752,22 +708,7 @@ def get_market_context():
                 return "✅ IHSG naik 3 hari", 2
         return "IHSG sideways", 0
     except Exception:
-        try:
-            # Fallback ke yahooquery
-            ticker = Ticker("^JKSE")
-            hist = ticker.history(period="5d")
-            if hist.empty or "close" not in hist.columns:
-                return "⚠️ IHSG tidak tersedia", 0
-            close_series = hist["close"]
-            if len(close_series) >= 3:
-                last_3 = close_series.iloc[-3:].pct_change().dropna()
-                if (last_3 < 0).all():
-                    return "⚠️ IHSG turun 3 hari", -2
-                elif (last_3 > 0).all():
-                    return "✅ IHSG naik 3 hari", 2
-            return "IHSG sideways", 0
-        except Exception:
-            return "⚠️ IHSG tidak tersedia", 0
+        return "⚠️ IHSG tidak tersedia", 0
 
 
 def get_timeframe_signal(df):
@@ -789,23 +730,11 @@ def get_timeframe_signal(df):
         score += 1
     elif ind.get("volume_status", "Normal") == "Rendah":
         score -= 0.5
-    if score >= 1.5:
-        return "BUY"
-    elif score <= -1.5:
-        return "SELL"
-    else:
-        return "HOLD"
+    return "BUY" if score >= 1.5 else ("SELL" if score <= -1.5 else "HOLD")
 
 
 def log_signal(ticker, signal, score, price):
-    record = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "ticker": ticker,
-        "signal": signal,
-        "score": score,
-        "price": price,
-        "status": "pending",
-    }
+    record = {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "ticker": ticker, "signal": signal, "score": score, "price": price, "status": "pending"}
     st.session_state.signal_history.insert(0, record)
     if len(st.session_state.signal_history) > 100:
         st.session_state.signal_history.pop()
@@ -815,11 +744,7 @@ def show_toast_if_changed(new_signal, old_signal):
     if old_signal and new_signal != old_signal:
         if new_signal in ["STRONG BUY", "BUY"] and old_signal in ["SELL", "STRONG SELL", "HOLD"]:
             st.toast(f"🟢 Sinyal berubah menjadi {new_signal}!", icon="🔔")
-        elif new_signal in ["STRONG SELL", "SELL"] and old_signal in [
-            "BUY",
-            "STRONG BUY",
-            "HOLD",
-        ]:
+        elif new_signal in ["STRONG SELL", "SELL"] and old_signal in ["BUY", "STRONG BUY", "HOLD"]:
             st.toast(f"🔴 Sinyal berubah menjadi {new_signal}!", icon="⚠️")
         elif new_signal == "HOLD" and old_signal in ["BUY", "STRONG BUY", "SELL", "STRONG SELL"]:
             st.toast("⚪ Sinyal menjadi HOLD, waspadai perubahan", icon="ℹ️")
@@ -868,7 +793,7 @@ def position_sizing(capital, risk_percent, entry_price, stop_loss):
         price_risk = abs(entry_price - stop_loss)
         if price_risk > 0:
             shares = int(risk_amount / price_risk)
-            shares = (shares // 100) * 100  # lot 100
+            shares = (shares // 100) * 100
             pos_value = shares * entry_price
             risk_amount_real = shares * price_risk
             return shares, pos_value, risk_amount_real
@@ -879,29 +804,20 @@ def detect_true_breakout(df, atr):
     if len(df) < 20:
         return {"is_breakout": False, "strength": 0, "message": "Data tidak cukup"}
     current_price = df["Close"].iloc[-1]
-    # Gunakan resistance tertinggi 20 periode (bukan hanya nilai terakhir)
     resistance = df["High"].rolling(20).max().iloc[-1]
     breakout_threshold = resistance + (atr * 0.5)
     if current_price > breakout_threshold:
         strength = (current_price - resistance) / atr
-        return {
-            "is_breakout": True,
-            "strength": round(strength, 2),
-            "message": f"✅ TRUE BREAKOUT! Strength: {strength:.1f}x ATR",
-        }
+        return {"is_breakout": True, "strength": round(strength, 2), "message": f"✅ TRUE BREAKOUT! Strength: {strength:.1f}x ATR"}
     elif current_price > resistance:
-        return {
-            "is_breakout": False,
-            "strength": 0,
-            "message": "⚠️ False breakout (belum melewati ATR buffer)",
-        }
+        return {"is_breakout": False, "strength": 0, "message": "⚠️ False breakout (belum melewati ATR buffer)"}
     else:
         return {"is_breakout": False, "strength": 0, "message": "Tidak ada breakout"}
 
 
 # ====================== MAIN APP ======================
 def main():
-    st.sidebar.markdown("# 🤖 Robot Saham v3 - Professional (Final)")
+    st.sidebar.markdown("# 🤖 Robot Saham v3 - Professional (No YahooQuery)")
     ticker_input = st.sidebar.text_input("Kode Saham", DEFAULT_TICKER)
     ticker = ticker_input.upper().strip()
     if not ticker.endswith(".JK") and not ticker.startswith("^"):
@@ -915,9 +831,7 @@ def main():
     )
     st.session_state.trading_mode = trading_mode
     if trading_mode in ["Scalping (5-15 menit)", "Intraday (30 menit - 4 jam)"]:
-        st.sidebar.warning(
-            "⚠️ Mode ini menggunakan data **daily** karena yfinance tidak menyediakan data menit yang stabil. Sinyal lebih cocok untuk trading harian."
-        )
+        st.sidebar.warning("⚠️ Mode ini menggunakan data **daily** karena yfinance tidak menyediakan data menit yang stabil. Sinyal lebih cocok untuk trading harian.")
 
     if trading_mode == "Scalping (5-15 menit)":
         st_period, st_mult = 7, 2.5
@@ -932,41 +846,11 @@ def main():
 
     with st.sidebar.expander("⚙️ Bobot Indikator (mempengaruhi keputusan)"):
         weights = {}
-        weights["trend"] = st.slider(
-            "Trend (EMA, Supertrend, PSAR)",
-            0.0,
-            3.0,
-            st.session_state.custom_weights.get("trend", 2.0),
-            0.1,
-        )
-        weights["momentum"] = st.slider(
-            "Momentum (RSI + MACD)",
-            0.0,
-            3.0,
-            st.session_state.custom_weights.get("momentum", 1.5),
-            0.1,
-        )
-        weights["volume"] = st.slider(
-            "Volume (OBV, Volume Spike)",
-            0.0,
-            3.0,
-            st.session_state.custom_weights.get("volume", 1.5),
-            0.1,
-        )
-        weights["smart_money"] = st.slider(
-            "Smart Money (CMF)",
-            0.0,
-            3.0,
-            st.session_state.custom_weights.get("smart_money", 1.5),
-            0.1,
-        )
-        weights["structure"] = st.slider(
-            "Structure (Swing Points)",
-            0.0,
-            3.0,
-            st.session_state.custom_weights.get("structure", 1.0),
-            0.1,
-        )
+        weights["trend"] = st.slider("Trend", 0.0, 3.0, st.session_state.custom_weights.get("trend", 2.0), 0.1)
+        weights["momentum"] = st.slider("Momentum", 0.0, 3.0, st.session_state.custom_weights.get("momentum", 1.5), 0.1)
+        weights["volume"] = st.slider("Volume", 0.0, 3.0, st.session_state.custom_weights.get("volume", 1.5), 0.1)
+        weights["smart_money"] = st.slider("Smart Money", 0.0, 3.0, st.session_state.custom_weights.get("smart_money", 1.5), 0.1)
+        weights["structure"] = st.slider("Structure", 0.0, 3.0, st.session_state.custom_weights.get("structure", 1.0), 0.1)
         if st.button("Simpan Bobot"):
             st.session_state.custom_weights = weights
     weights = st.session_state.custom_weights.copy()
@@ -991,7 +875,6 @@ def main():
 
     regime = detect_market_regime(df)
 
-    # MTF alignment
     def safe_load(ticker, period, interval):
         try:
             d = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False)
@@ -1021,7 +904,7 @@ def main():
     entry_eligible = decision["score"] >= 5
     entry_warning = 2 <= decision["score"] < 5
 
-    bull_prob, bear_prob = calculate_probabilities(df)
+    bull_prob, _ = calculate_probabilities(df)
 
     st.title(f"🤖 {ticker}")
     st.caption(f"Mode: {trading_mode} | Regime: {regime} | MTF Alignment: {mtf_alignment:.2f}")
@@ -1052,9 +935,7 @@ def main():
 
     col1, col2, col3 = st.columns(3)
     cmf_val = indicators["cmf"]
-    cmf_text = (
-        "🟢 Akumulasi" if cmf_val > 0.15 else "🔴 Distribusi" if cmf_val < -0.15 else "⚪ Netral"
-    )
+    cmf_text = "🟢 Akumulasi" if cmf_val > 0.15 else ("🔴 Distribusi" if cmf_val < -0.15 else "⚪ Netral")
     col1.metric("💰 Smart Money (CMF)", cmf_text, delta=f"{cmf_val:.2f}")
     col2.metric("📈 Swing Low", f"Rp {indicators['swing_low']:,.0f}")
     col3.metric("📉 Swing High", f"Rp {indicators['swing_high']:,.0f}")
@@ -1070,7 +951,7 @@ def main():
 
     if ui_mode == "Advanced (Full Indicators)":
         st.markdown("---")
-        st.caption("📊 Indikator Lanjutan (Mode Advanced)")
+        st.caption("📊 Indikator Lanjutan")
         adv_cols = st.columns(5)
         adv_cols[0].metric("Stochastic K", f"{indicators['stoch_k']:.1f}")
         adv_cols[1].metric("Stochastic D", f"{indicators['stoch_d']:.1f}")
@@ -1125,9 +1006,7 @@ def main():
     with st.expander("📐 Position Sizing"):
         capital = st.number_input("Modal (Rp)", value=100_000_000.0, step=10_000_000.0)
         risk_percent = st.number_input("Risiko per trade (%)", value=2.0, step=0.5)
-        shares, pos_value, risk_amt = position_sizing(
-            capital, risk_percent, entry_levels["buy_entry"], entry_levels["stop_loss"]
-        )
+        shares, pos_value, risk_amt = position_sizing(capital, risk_percent, entry_levels["buy_entry"], entry_levels["stop_loss"])
         if shares > 0:
             st.write(f"Jumlah saham: {shares:,} lembar")
             st.write(f"Nilai posisi: Rp {pos_value:,.0f} ({pos_value/capital*100:.1f}% dari modal)")
