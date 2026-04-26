@@ -10,6 +10,7 @@ import random
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
 
+# XGBoost fallback
 try:
     from xgboost import XGBClassifier
     XGB_AVAILABLE = True
@@ -19,7 +20,7 @@ except ImportError:
 
 warnings.filterwarnings("ignore")
 
-st.set_page_config(layout="wide", page_title="Robot Saham v9 - Hedge Fund Complete", page_icon="🤖")
+st.set_page_config(layout="wide", page_title="Robot Saham v9 - Hedge Fund Pro", page_icon="🤖")
 
 st.markdown(
     """
@@ -39,7 +40,7 @@ BREAKOUT_COOLDOWN_HOURS = 24
 TRADING_FEE = 0.0015
 SLIPPAGE = 0.001
 
-# session state
+# Session state
 if "signal_history" not in st.session_state:
     st.session_state.signal_history = []
 if "last_signal" not in st.session_state:
@@ -65,7 +66,7 @@ if "last_retrain" not in st.session_state:
 if "walk_forward_result" not in st.session_state:
     st.session_state.walk_forward_result = None
 
-# ====================== FUNGSI INDIKATOR (LENGKAP) ======================
+# ====================== INDIKATOR TEKNIKAL (LENGKAP) ======================
 def calculate_supertrend(df, period=10, multiplier=3.0):
     high = df["High"]
     low = df["Low"]
@@ -176,40 +177,6 @@ def calculate_kst(df, roc1=10, roc2=15, roc3=20, roc4=30, ma1=10, ma2=10, ma3=10
 def calculate_elder_ray(df, window=13):
     ema = df["Close"].ewm(span=window, adjust=False).mean()
     return df["High"] - ema, df["Low"] - ema
-
-# ====================== REGIME ML CLASSIFIER ======================
-def train_regime_classifier(df):
-    X = []
-    y = []
-    for i in range(60, len(df)-20):
-        slice_df = df.iloc[:i+1]
-        if len(slice_df) < 30: continue
-        adx = ta.trend.ADXIndicator(slice_df["High"], slice_df["Low"], slice_df["Close"], window=14).adx().iloc[-1]
-        atr = slice_df["ATR"].iloc[-1]
-        rsi = slice_df["RSI"].iloc[-1]
-        macd_hist = slice_df["MACD_Hist"].iloc[-1]
-        volatility = (slice_df["High"].iloc[-20:] - slice_df["Low"].iloc[-20:]).mean() / slice_df["Close"].iloc[-1]
-        future_returns = (df["Close"].iloc[i+20] - df["Close"].iloc[i]) / df["Close"].iloc[i]
-        label = 1 if (adx > 25 and abs(future_returns) > 0.02) else 0
-        X.append([adx, atr, rsi, macd_hist, volatility])
-        y.append(label)
-    if len(X) < 50: return None
-    model = RandomForestClassifier(n_estimators=100, max_depth=4, random_state=42)
-    model.fit(X, y)
-    return model
-
-def predict_regime(df, model):
-    if model is None:
-        return detect_market_regime(df)
-    slice_df = df.tail(60)
-    adx = ta.trend.ADXIndicator(slice_df["High"], slice_df["Low"], slice_df["Close"], window=14).adx().iloc[-1]
-    atr = slice_df["ATR"].iloc[-1]
-    rsi = slice_df["RSI"].iloc[-1]
-    macd_hist = slice_df["MACD_Hist"].iloc[-1]
-    volatility = (slice_df["High"].iloc[-20:] - slice_df["Low"].iloc[-20:]).mean() / slice_df["Close"].iloc[-1]
-    X = np.array([[adx, atr, rsi, macd_hist, volatility]])
-    prob = model.predict_proba(X)[0][1]
-    return "TREND" if prob > 0.5 else "SIDEWAYS"
 
 def detect_market_regime(df, adx_threshold=25):
     if len(df) < 30: return "SIDEWAYS"
@@ -497,7 +464,7 @@ def decision_engine_pro(indicators, mtf_alignment, regime, weights, threshold_bu
     else:
         return "HOLD", score, "LOW"
 
-# ====================== ML DATASET & MODEL (RAW FEATURES) ======================
+# ====================== ML MODEL (RAW FEATURES) ======================
 def build_ml_dataset_raw(df):
     X = []
     y = []
@@ -568,7 +535,7 @@ def final_decision_ultra(indicators, mtf, regime, weights, model, threshold_buy=
     else:
         return "HOLD", score, ml_prob
 
-# ====================== BACKTEST DENGAN TRAILING STOP & EXIT SIGNAL ======================
+# ====================== BACKTEST LENGKAP (DENGAN TRADES LIST) ======================
 def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_trade=0.02, model=None,
                           threshold_buy=3.0, threshold_strong=6.0, use_trailing=True):
     if df.empty or len(df) < period_days: return None
@@ -577,6 +544,7 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
     positions = []
     equity = [balance]
     trades = []
+    last_signal = "HOLD"
     for i in range(60, len(df_test)):
         slice_df = df_test.iloc[:i+1]
         ind = get_latest_indicators(slice_df)
@@ -611,7 +579,7 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
                     shares = int(risk_amount / price_risk)
                     shares = (shares // 100) * 100
                     if shares > 0:
-                        positions.append({"entry": entry_price, "stop": stop_loss, "target": target, "shares": shares})
+                        positions.append({"entry": entry_price, "stop": stop_loss, "target": target, "shares": shares, "trailing_stop": stop_loss})
         # Manage existing position
         elif len(positions) > 0:
             pos = positions[0]
@@ -635,6 +603,7 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
             equity.append(balance)
         else:
             equity.append(balance)
+        last_signal = signal
 
     if len(trades) == 0: return None
     win_trades = [t for t in trades if t["pnl"] > 0]
@@ -666,14 +635,15 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
         "trade_list": trades
     }
 
-# ====================== MONTE CARLO ADVANCED ======================
+# ====================== MONTE CARLO LANJUTAN ======================
 def monte_carlo_equity(trades, n_sim=500, start_balance=100_000_000):
-    if not trades:
+    if not trades or len(trades) < 5:
         return None
     pnls = [t["pnl"] for t in trades]
     all_equity = []
     final_balances = []
     drawdowns = []
+
     for _ in range(n_sim):
         shuffled = np.random.permutation(pnls)
         equity = start_balance
@@ -683,9 +653,11 @@ def monte_carlo_equity(trades, n_sim=500, start_balance=100_000_000):
         for pnl in shuffled:
             equity += pnl
             equity_curve.append(equity)
-            peak = max(peak, equity)
-            dd = (peak - equity) / peak * 100
-            max_dd = max(max_dd, dd)
+            if equity > peak:
+                peak = equity
+            dd = (peak - equity) / peak * 100 if peak != 0 else 0
+            if dd > max_dd:
+                max_dd = dd
         all_equity.append(equity_curve)
         final_balances.append(equity)
         drawdowns.append(max_dd)
@@ -696,8 +668,9 @@ def monte_carlo_equity(trades, n_sim=500, start_balance=100_000_000):
     }
 
 # ====================== PORTFOLIO MULTI-STOCK ENGINE ======================
-def run_portfolio_backtest(tickers, weights, model, period="1y"):
+def run_portfolio_backtest(tickers, weights, model, period="1y", threshold_buy=3.0, threshold_strong=6.0):
     results = []
+    scores = []
     for t in tickers:
         try:
             df_raw = yf.download(t, period=period, progress=False, auto_adjust=False)
@@ -705,27 +678,148 @@ def run_portfolio_backtest(tickers, weights, model, period="1y"):
                 continue
             df = calculate_all_indicators(df_raw, 10, 3.0, "Swing (Daily)")
             ind = get_latest_indicators(df)
-            if not ind: continue
-            regime = detect_market_regime(df)  # bisa pakai rule atau ML
-            signal, score, ml_prob = final_decision_ultra(ind, 0.0, regime, weights, model, 3.0, 6.0)
-            results.append({
-                "ticker": t,
-                "price": ind["price"],
-                "score": score,
-                "signal": signal,
-                "ml_prob": ml_prob
-            })
+            regime = detect_market_regime(df)
+            # MTF diabaikan untuk portfolio sederhana
+            signal, score, ml_prob = final_decision_ultra(ind, 0.0, regime, weights, model, threshold_buy, threshold_strong)
+            scores.append((t, score, ind["price"]))
         except Exception as e:
+            st.warning(f"Error untuk {t}: {e}")
             continue
-    if not results:
+    if not scores:
         return None
-    # Alokasi berdasarkan absolute score
-    total_score = sum(abs(r["score"]) for r in results)
-    for r in results:
-        r["weight"] = abs(r["score"]) / total_score if total_score > 0 else 0
-    return results
+    total_score = sum(abs(s) for _, s, _ in scores)
+    portfolio = []
+    for t, s, price in scores:
+        if total_score == 0:
+            weight = 0
+        else:
+            weight = abs(s) / total_score
+        portfolio.append({
+            "ticker": t,
+            "score": s,
+            "weight": weight,
+            "price": price,
+            "allocation_%": weight * 100
+        })
+    return portfolio
 
-# ====================== FUNGSI LAIN (BACKTEST SIMPLE, OPTIMIZER, DLL) ======================
+# ====================== FUNGSI PENDUKUNG LAINNYA ======================
+def get_market_context():
+    try:
+        ihsg = yf.download("^JKSE", period="5d", progress=False, auto_adjust=False)
+        if ihsg.empty or "Close" not in ihsg.columns: return "⚠️ IHSG tidak tersedia", 0
+        ihsg_close = ihsg["Close"]
+        if len(ihsg_close) >= 3:
+            last_3 = ihsg_close.iloc[-3:].pct_change().dropna()
+            if (last_3 < 0).all(): return "⚠️ IHSG turun 3 hari", -2
+            elif (last_3 > 0).all(): return "✅ IHSG naik 3 hari", 2
+        return "IHSG sideways", 0
+    except Exception:
+        return "⚠️ IHSG tidak tersedia", 0
+
+def log_signal(ticker, signal, score, price):
+    record = {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "ticker": ticker, "signal": signal, "score": score, "price": price, "status": "pending"}
+    st.session_state.signal_history.insert(0, record)
+    if len(st.session_state.signal_history)>100: st.session_state.signal_history.pop()
+
+def show_toast_if_changed(new_signal, old_signal):
+    if old_signal and new_signal != old_signal:
+        if new_signal in ["STRONG BUY","BUY"] and old_signal in ["SELL","STRONG SELL","HOLD"]:
+            st.toast(f"🟢 Sinyal berubah menjadi {new_signal}!", icon="🔔")
+        elif new_signal in ["STRONG SELL","SELL"] and old_signal in ["BUY","STRONG BUY","HOLD"]:
+            st.toast(f"🔴 Sinyal berubah menjadi {new_signal}!", icon="⚠️")
+        elif new_signal=="HOLD" and old_signal in ["BUY","STRONG BUY","SELL","STRONG SELL"]:
+            st.toast("⚪ Sinyal menjadi HOLD, waspadai perubahan", icon="ℹ️")
+
+def show_breakout_alert(breakout, last_time):
+    if breakout["is_breakout"]:
+        now = datetime.now()
+        if last_time is None or (now-last_time).total_seconds() > BREAKOUT_COOLDOWN_HOURS*3600:
+            st.toast(f"🚀 {breakout['message']}", icon="📈")
+            st.session_state.last_breakout_notify_time = now
+            return True
+    return False
+
+def get_signal_interpretation(signal):
+    interpretations = {
+        "STRONG BUY": "📌 **Peluang naik sangat kuat.** Hybrid AI + rule engine mendukung.",
+        "BUY": "📌 **Kondisi cukup baik.** Masih ada ruang naik, tetapi perlu konfirmasi.",
+        "HOLD": "📌 **Tidak ada sinyal jelas.** Tunggu breakout atau breakdown.",
+        "SELL": "📌 **Tekanan turun mulai terlihat.** Pertimbangkan exit bertahap.",
+        "STRONG SELL": "📌 **Kondisi lemah.** Risiko besar, hindari entry.",
+    }
+    return interpretations.get(signal, "Netral.")
+
+def calculate_probabilities(df):
+    try:
+        bull=0
+        if df["RSI"].iloc[-1] < 35: bull+=1
+        if df["Close"].iloc[-1] > df["SMA20"].iloc[-1]: bull+=1
+        if df["MACD_Hist"].iloc[-1] > 0: bull+=1
+        bear=3-bull
+        total=bull+bear
+        return (bull/total*100) if total>0 else 50, (bear/total*100) if total>0 else 50
+    except: return 50,50
+
+def position_sizing(capital, risk_percent, entry_price, stop_loss):
+    if entry_price and stop_loss and capital>0:
+        risk_amount = capital * (risk_percent/100)
+        price_risk = abs(entry_price - stop_loss)
+        if price_risk>0:
+            shares = int(risk_amount / price_risk)
+            shares = (shares//100)*100
+            pos_value = shares * entry_price
+            risk_amount_real = shares * price_risk
+            return shares, pos_value, risk_amount_real
+    return 0,0,0
+
+def detect_true_breakout(df, atr):
+    if len(df) < 20:
+        return {"is_breakout": False, "strength": 0, "message": "Data tidak cukup"}
+    current_price = df["Close"].iloc[-1]
+    resistance = df["High"].rolling(20).max().iloc[-1]
+    volume = df["Volume"].iloc[-1] if "Volume" in df.columns else 0
+    vol_ma = df["Volume"].rolling(20).mean().iloc[-1] if "Volume" in df.columns else 1
+    volume_confirm = volume > vol_ma * 1.5
+    breakout_threshold = resistance + (atr * 0.5)
+    if current_price > breakout_threshold:
+        strength = (current_price - resistance) / atr
+        if volume_confirm:
+            return {"is_breakout": True, "strength": round(strength,2), "message": f"✅ TRUE BREAKOUT with volume! Strength: {strength:.1f}x ATR"}
+        else:
+            return {"is_breakout": False, "strength": round(strength,2), "message": "⚠️ Breakout tapi volume rendah, rawan false"}
+    elif current_price > resistance:
+        return {"is_breakout": False, "strength": 0, "message": "⚠️ False breakout (belum melewati ATR buffer)"}
+    else:
+        return {"is_breakout": False, "strength": 0, "message": "Tidak ada breakout"}
+
+def get_entry_levels_advanced(df, indicators, regime):
+    price = indicators["price"]
+    atr = indicators["atr"]
+    swing_low = indicators["swing_low"]
+    swing_high = indicators["swing_high"]
+    ema20 = indicators["sma20"]
+    support = indicators["support"]
+    resistance = indicators["resistance"]
+    if regime == "TREND":
+        if price > ema20 and price > swing_high:
+            buy_entry = price + atr * 0.2
+            stop_loss = swing_low - atr * 0.5
+            target = resistance if resistance > price else price + atr * 3
+        else:
+            buy_entry = ema20
+            stop_loss = swing_low - atr * 0.5
+            target = swing_high + atr
+    else:
+        buy_entry = support + atr * 0.3
+        stop_loss = swing_low - atr * 0.5
+        target = resistance - atr * 0.5
+    if stop_loss >= buy_entry:
+        stop_loss = buy_entry - 2 * atr
+        if stop_loss < 0: stop_loss = buy_entry * 0.95
+    return {"buy_entry": buy_entry, "stop_loss": stop_loss, "target": target}
+
+# ====================== PARAMETER TUNING & OPTIMASI ======================
 def run_backtest_simple(df, weights, period_days=180, risk_per_trade=0.02, threshold_buy=3.0):
     if df.empty or len(df) < period_days: return None
     df_test = df.tail(period_days).copy()
@@ -846,152 +940,9 @@ def walk_forward_profit(df, train_size=200, test_size=50, use_xgb=True):
         results.append(profit_factor)
     return np.mean(results) if results else 0
 
-# ====================== FUNGSI PENDUKUNG UI ======================
-def get_market_context():
-    try:
-        ihsg = yf.download("^JKSE", period="5d", progress=False, auto_adjust=False)
-        if ihsg.empty or "Close" not in ihsg.columns: return "⚠️ IHSG tidak tersedia", 0
-        ihsg_close = ihsg["Close"]
-        if len(ihsg_close) >= 3:
-            last_3 = ihsg_close.iloc[-3:].pct_change().dropna()
-            if (last_3 < 0).all(): return "⚠️ IHSG turun 3 hari", -2
-            elif (last_3 > 0).all(): return "✅ IHSG naik 3 hari", 2
-        return "IHSG sideways", 0
-    except Exception:
-        return "⚠️ IHSG tidak tersedia", 0
-
-def log_signal(ticker, signal, score, price):
-    record = {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "ticker": ticker, "signal": signal, "score": score, "price": price, "status": "pending"}
-    st.session_state.signal_history.insert(0, record)
-    if len(st.session_state.signal_history)>100: st.session_state.signal_history.pop()
-
-def show_toast_if_changed(new_signal, old_signal):
-    if old_signal and new_signal != old_signal:
-        if new_signal in ["STRONG BUY","BUY"] and old_signal in ["SELL","STRONG SELL","HOLD"]:
-            st.toast(f"🟢 Sinyal berubah menjadi {new_signal}!", icon="🔔")
-        elif new_signal in ["STRONG SELL","SELL"] and old_signal in ["BUY","STRONG BUY","HOLD"]:
-            st.toast(f"🔴 Sinyal berubah menjadi {new_signal}!", icon="⚠️")
-        elif new_signal=="HOLD" and old_signal in ["BUY","STRONG BUY","SELL","STRONG SELL"]:
-            st.toast("⚪ Sinyal menjadi HOLD, waspadai perubahan", icon="ℹ️")
-
-def show_breakout_alert(breakout, last_time):
-    if breakout["is_breakout"]:
-        now = datetime.now()
-        if last_time is None or (now-last_time).total_seconds() > BREAKOUT_COOLDOWN_HOURS*3600:
-            st.toast(f"🚀 {breakout['message']}", icon="📈")
-            st.session_state.last_breakout_notify_time = now
-            return True
-    return False
-
-def get_signal_interpretation(signal):
-    interpretations = {
-        "STRONG BUY": "📌 **Peluang naik sangat kuat.** Hybrid AI + rule engine mendukung.",
-        "BUY": "📌 **Kondisi cukup baik.** Masih ada ruang naik, tetapi perlu konfirmasi.",
-        "HOLD": "📌 **Tidak ada sinyal jelas.** Tunggu breakout atau breakdown.",
-        "SELL": "📌 **Tekanan turun mulai terlihat.** Pertimbangkan exit bertahap.",
-        "STRONG SELL": "📌 **Kondisi lemah.** Risiko besar, hindari entry.",
-    }
-    return interpretations.get(signal, "Netral.")
-
-def calculate_probabilities(df):
-    try:
-        bull=0
-        if df["RSI"].iloc[-1] < 35: bull+=1
-        if df["Close"].iloc[-1] > df["SMA20"].iloc[-1]: bull+=1
-        if df["MACD_Hist"].iloc[-1] > 0: bull+=1
-        bear=3-bull
-        total=bull+bear
-        return (bull/total*100) if total>0 else 50, (bear/total*100) if total>0 else 50
-    except: return 50,50
-
-def position_sizing(capital, risk_percent, entry_price, stop_loss):
-    if entry_price and stop_loss and capital>0:
-        risk_amount = capital * (risk_percent/100)
-        price_risk = abs(entry_price - stop_loss)
-        if price_risk>0:
-            shares = int(risk_amount / price_risk)
-            shares = (shares//100)*100
-            pos_value = shares * entry_price
-            risk_amount_real = shares * price_risk
-            return shares, pos_value, risk_amount_real
-    return 0,0,0
-
-def detect_true_breakout(df, atr):
-    if len(df) < 20:
-        return {"is_breakout": False, "strength": 0, "message": "Data tidak cukup"}
-    current_price = df["Close"].iloc[-1]
-    resistance = df["High"].rolling(20).max().iloc[-1]
-    volume = df["Volume"].iloc[-1] if "Volume" in df.columns else 0
-    vol_ma = df["Volume"].rolling(20).mean().iloc[-1] if "Volume" in df.columns else 1
-    volume_confirm = volume > vol_ma * 1.5
-    breakout_threshold = resistance + (atr * 0.5)
-    if current_price > breakout_threshold:
-        strength = (current_price - resistance) / atr
-        if volume_confirm:
-            return {"is_breakout": True, "strength": round(strength,2), "message": f"✅ TRUE BREAKOUT with volume! Strength: {strength:.1f}x ATR"}
-        else:
-            return {"is_breakout": False, "strength": round(strength,2), "message": "⚠️ Breakout tapi volume rendah, rawan false"}
-    elif current_price > resistance:
-        return {"is_breakout": False, "strength": 0, "message": "⚠️ False breakout (belum melewati ATR buffer)"}
-    else:
-        return {"is_breakout": False, "strength": 0, "message": "Tidak ada breakout"}
-
-def get_entry_levels_advanced(df, indicators, regime):
-    price = indicators["price"]
-    atr = indicators["atr"]
-    swing_low = indicators["swing_low"]
-    swing_high = indicators["swing_high"]
-    ema20 = indicators["sma20"]
-    support = indicators["support"]
-    resistance = indicators["resistance"]
-    if regime == "TREND":
-        if price > ema20 and price > swing_high:
-            buy_entry = price + atr * 0.2
-            stop_loss = swing_low - atr * 0.5
-            target = resistance if resistance > price else price + atr * 3
-        else:
-            buy_entry = ema20
-            stop_loss = swing_low - atr * 0.5
-            target = swing_high + atr
-    else:
-        buy_entry = support + atr * 0.3
-        stop_loss = swing_low - atr * 0.5
-        target = resistance - atr * 0.5
-    if stop_loss >= buy_entry:
-        stop_loss = buy_entry - 2 * atr
-        if stop_loss < 0: stop_loss = buy_entry * 0.95
-    return {"buy_entry": buy_entry, "stop_loss": stop_loss, "target": target}
-
-# ====================== MULTI-STOCK GLOBAL MODEL (OPTIONAL) ======================
-def build_multi_stock_dataset(ticker_list, period="1y"):
-    X_all, y_all = [], []
-    for t in ticker_list:
-        try:
-            df_raw = yf.download(t, period=period, progress=False, auto_adjust=False)
-            if df_raw.empty: continue
-            df = calculate_all_indicators(df_raw, 10, 3.0, "Swing (Daily)")
-            X, y = build_ml_dataset_raw(df)
-            if len(X) > 0:
-                X_all.extend(X); y_all.extend(y)
-        except: continue
-    if len(X_all) < 200: return None, None
-    return np.array(X_all), np.array(y_all)
-
-def train_global_model(ticker_list, period="1y", use_xgb=True):
-    X, y = build_multi_stock_dataset(ticker_list, period)
-    if X is None: return None
-    if use_xgb and XGB_AVAILABLE:
-        model = XGBClassifier(n_estimators=300, max_depth=5, learning_rate=0.05,
-                              subsample=0.8, colsample_bytree=0.8,
-                              eval_metric="logloss", random_state=42)
-    else:
-        model = RandomForestClassifier(n_estimators=200, max_depth=5, random_state=42)
-    model.fit(X, y)
-    return model
-
 # ====================== MAIN APP ======================
 def main():
-    st.sidebar.markdown("# 🤖 Robot Saham v9 - Hedge Fund Complete")
+    st.sidebar.markdown("# 🤖 Robot Saham v9 - Hedge Fund Pro")
     ticker_input = st.sidebar.text_input("Kode Saham", DEFAULT_TICKER)
     ticker = ticker_input.upper().strip()
     if not ticker.endswith(".JK") and not ticker.startswith("^"): ticker += ".JK"
@@ -1046,12 +997,8 @@ def main():
         st.stop()
     price = indicators["price"]
 
-    # Regime dengan ML classifier
-    regime_model = train_regime_classifier(df)
-    if regime_model is not None:
-        regime = predict_regime(df, regime_model)
-    else:
-        regime = detect_market_regime(df)
+    # Regime detection (sederhana, tidak wajib ML)
+    regime = detect_market_regime(df)
 
     # MTF
     def safe_load(ticker, period, interval):
@@ -1088,8 +1035,8 @@ def main():
     entry_warning = (threshold_buy-1.5) <= score < threshold_buy
     bull_prob, _ = calculate_probabilities(df)
 
-    st.title(f"🤖 {ticker} (v9 Hedge Fund Complete)")
-    st.caption(f"Mode: {trading_mode} | Regime: {regime} (ML classifier) | MTF: {mtf_alignment:.2f} | ML Prob: {ml_prob*100:.1f}% | Model: {'XGBoost' if use_xgb else 'RandomForest'}")
+    st.title(f"🤖 {ticker} (v9 Hedge Fund Pro)")
+    st.caption(f"Mode: {trading_mode} | Regime: {regime} | MTF: {mtf_alignment:.2f} | ML Prob: {ml_prob*100:.1f}% | Model: {'XGBoost' if use_xgb else 'RandomForest'}")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("💰 Harga", f"Rp {price:,.0f}")
     col2.metric("📊 RSI", f"{indicators['rsi']:.1f}")
@@ -1144,7 +1091,7 @@ def main():
     with st.expander("📖 Arti Sinyal"): st.markdown(get_signal_interpretation(signal))
     with st.expander("📋 Detail Analisis (Hybrid AI Ultra)"):
         fv = build_feature_vector(indicators)
-        st.write(f"- Regime: {regime} (ML classifier)")
+        st.write(f"- Regime: {regime}")
         st.write(f"- Trend group: {fv['trend']:.2f}")
         st.write(f"- Momentum group: {fv['momentum']:.2f}")
         st.write(f"- Volume group: {fv['volume']:.2f}")
@@ -1184,49 +1131,50 @@ def main():
                         ax.set_xlabel("Iteration")
                         ax.set_ylabel("Balance (Rp)")
                         st.pyplot(fig)
-                        
-                        # ========== MONTE CARLO ADVANCED ==========
-                        st.markdown("### 🎲 Monte Carlo Simulation (Advanced)")
-                        if bt["trade_list"]:
-                            mc_runs = st.slider("Jumlah simulasi", 100, 2000, 500, 100, key="mc_slider")
-                            if st.button("Jalankan Monte Carlo", key="mc_button"):
-                                with st.spinner("Running Monte Carlo..."):
-                                    mc = monte_carlo_equity(bt["trade_list"], n_sim=mc_runs, start_balance=100_000_000)
-                                    if mc:
-                                        worst_dd = np.max(mc["drawdowns"])
-                                        avg_dd = np.mean(mc["drawdowns"])
-                                        median_dd = np.median(mc["drawdowns"])
-                                        col_a, col_b, col_c = st.columns(3)
-                                        col_a.metric("Worst DD", f"{worst_dd:.1f}%")
-                                        col_b.metric("Average DD", f"{avg_dd:.1f}%")
-                                        col_c.metric("Median DD", f"{median_dd:.1f}%")
-                                        # Risk of ruin (kehilangan >50% modal)
-                                        ruin_prob = np.sum(np.array(mc["final_balances"]) < 50_000_000) / len(mc["final_balances"]) * 100
-                                        st.metric("💀 Risk of Ruin (loss >50%)", f"{ruin_prob:.1f}%")
-                                        # Plot equity paths (first 100)
-                                        fig_mc, ax_mc = plt.subplots(figsize=(10,5))
-                                        for i, path in enumerate(mc["equity_curves"]):
-                                            if i >= 100: break
-                                            ax_mc.plot(path, alpha=0.2)
-                                        ax_mc.set_title("Monte Carlo Equity Paths (First 100)")
-                                        ax_mc.set_xlabel("Trade Sequence")
-                                        ax_mc.set_ylabel("Balance (Rp)")
-                                        st.pyplot(fig_mc)
-                                        # Distribusi final balance
-                                        fig_mc2, ax_mc2 = plt.subplots(figsize=(8,4))
-                                        ax_mc2.hist(mc["final_balances"], bins=30)
-                                        ax_mc2.set_title("Distribusi Final Balance")
-                                        ax_mc2.set_xlabel("Balance (Rp)")
-                                        st.pyplot(fig_mc2)
-                                        # Insight
-                                        if worst_dd > bt["max_drawdown"] * 1.5:
-                                            st.warning("⚠️ Risiko sebenarnya jauh lebih besar dari backtest!")
-                                        if avg_dd > 25:
-                                            st.error("❌ Drawdown tinggi, sistem berisiko")
-                                        else:
-                                            st.success("✅ Drawdown relatif stabil")
+                        # Monte Carlo Advanced
+                        st.markdown("### 🎲 Monte Carlo Simulation (Equity Paths)")
+                        mc_runs = st.slider("Jumlah simulasi", 100, 2000, 500, 100, key="mc_slider")
+                        if st.button("Jalankan Monte Carlo", key="mc_button"):
+                            with st.spinner("Running Monte Carlo..."):
+                                mc = monte_carlo_equity(bt["trade_list"], n_sim=mc_runs, start_balance=100_000_000)
+                                if mc:
+                                    final_bal = np.array(mc["final_balances"])
+                                    dd = np.array(mc["drawdowns"])
+                                    worst_dd = dd.max()
+                                    avg_dd = dd.mean()
+                                    median_dd = np.median(dd)
+                                    col_a, col_b, col_c = st.columns(3)
+                                    col_a.metric("Worst DD", f"{worst_dd:.1f}%")
+                                    col_b.metric("Average DD", f"{avg_dd:.1f}%")
+                                    col_c.metric("Median DD", f"{median_dd:.1f}%")
+                                    ruin_prob = np.mean(final_bal < 50_000_000) * 100
+                                    st.metric("💀 Risk of Ruin (<50% modal)", f"{ruin_prob:.1f}%")
+                                    if worst_dd > bt["max_drawdown"] * 1.5:
+                                        st.warning("⚠️ Risiko sebenarnya jauh lebih besar dari backtest!")
+                                    if avg_dd > 25:
+                                        st.error("❌ Drawdown tinggi, sistem berisiko")
                                     else:
-                                        st.warning("Tidak cukup data untuk Monte Carlo.")
+                                        st.success("✅ Drawdown relatif stabil")
+                                    # Plot equity paths (max 100)
+                                    fig2, ax2 = plt.subplots(figsize=(10,5))
+                                    for path in mc["equity_curves"][:100]:
+                                        ax2.plot(path, alpha=0.2, linewidth=0.5)
+                                    ax2.set_title("Monte Carlo Equity Paths (100 sampel)")
+                                    ax2.set_xlabel("Trade sequence")
+                                    ax2.set_ylabel("Balance (Rp)")
+                                    st.pyplot(fig2)
+                                    # Distribusi final balance
+                                    fig3, ax3 = plt.subplots(figsize=(8,4))
+                                    ax3.hist(final_bal, bins=30)
+                                    ax3.set_title("Distribusi Final Balance")
+                                    ax3.set_xlabel("Balance (Rp)")
+                                    ax3.set_ylabel("Frekuensi")
+                                    st.pyplot(fig3)
+                                    # Percentile
+                                    p5 = np.percentile(final_bal, 5)
+                                    p95 = np.percentile(final_bal, 95)
+                                    st.write(f"📊 5th percentile (worst realistic): Rp {p5:,.0f}")
+                                    st.write(f"📈 95th percentile (best realistic): Rp {p95:,.0f}")
                     else:
                         st.warning("Data tidak cukup atau tidak ada sinyal")
         with col2:
@@ -1262,36 +1210,22 @@ def main():
         if st.session_state.walk_forward_result is not None:
             st.metric("Walk-Forward PF", f"{st.session_state.walk_forward_result:.2f}")
         st.markdown("---")
-        st.subheader("🌍 Multi-Stock Portfolio Allocation")
+        st.subheader("📊 Portfolio Multi-Stock Allocation")
         default_tickers = ["BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "UNVR.JK"]
         tickers_input = st.text_input("Daftar saham (pisah koma)", value=",".join(default_tickers))
         if st.button("Run Portfolio Allocation"):
             ticker_list = [t.strip() for t in tickers_input.split(",") if t.strip()]
-            with st.spinner("Menghitung portfolio allocation..."):
-                portfolio = run_portfolio_backtest(ticker_list, weights, ml_model, period="1y")
+            with st.spinner("Menghitung alokasi portfolio..."):
+                portfolio = run_portfolio_backtest(ticker_list, weights, ml_model, period="1y", threshold_buy=threshold_buy, threshold_strong=threshold_strong)
                 if portfolio:
                     df_port = pd.DataFrame(portfolio)
-                    df_port["allocation_%"] = df_port["weight"] * 100
-                    st.dataframe(df_port[["ticker", "price", "score", "signal", "allocation_%"]])
+                    st.dataframe(df_port[["ticker", "score", "allocation_%", "price"]])
                     fig, ax = plt.subplots()
                     ax.pie(df_port["allocation_%"], labels=df_port["ticker"], autopct='%1.1f%%')
-                    ax.set_title("Portfolio Allocation (based on score)")
+                    ax.set_title("Portfolio Allocation (Berdasarkan Skor)")
                     st.pyplot(fig)
-                    total_score = df_port["score"].sum()
-                    st.write(f"Total portfolio score: {total_score:.2f}")
                 else:
                     st.warning("Tidak ada data portfolio yang valid.")
-        st.markdown("---")
-        st.subheader("🌍 Multi-Stock Global Model Training")
-        if st.button("Train Global Model (for ML)"):
-            ticker_list = [t.strip() for t in tickers_input.split(",") if t.strip()]
-            with st.spinner("Training global model..."):
-                global_m = train_global_model(ticker_list, period="1y", use_xgb=use_xgb)
-                if global_m:
-                    st.session_state.global_model = global_m
-                    st.success("Global model trained. You can now use it for predictions (not automatically integrated).")
-                else:
-                    st.error("Training failed. Not enough data.")
 
     with st.expander("📜 Riwayat Sinyal & Ekspor"):
         if st.session_state.signal_history:
@@ -1308,7 +1242,7 @@ def main():
             st.write(f"Jumlah saham: {shares:,} lembar")
             st.write(f"Nilai posisi: Rp {pos_value:,.0f} ({pos_value/capital*100:.1f}% dari modal)")
             st.write(f"Risiko stop loss: Rp {risk_amt:,.0f} ({risk_percent:.1f}%)")
-    st.caption("⚠️ Edukasi saja, bukan rekomendasi investasi. Fitur: Hybrid AI, Monte Carlo advanced, portfolio allocation, Sharpe optimization, walk-forward, regime ML classifier.")
+    st.caption("⚠️ Edukasi saja, bukan rekomendasi investasi. Backtest menggunakan risk-based, fee 0.15%, slippage 0.1%. Fitur: Monte Carlo equity paths, portfolio allocation, Sharpe optimization, trailing stop, walk-forward.")
     gc.collect()
 
 if __name__ == "__main__":
