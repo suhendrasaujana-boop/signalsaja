@@ -19,7 +19,7 @@ except ImportError:
 
 warnings.filterwarnings("ignore")
 
-st.set_page_config(layout="wide", page_title="Robot Saham v8 - Hedge Fund Lite", page_icon="🤖")
+st.set_page_config(layout="wide", page_title="Robot Saham v9 - Hedge Fund Complete", page_icon="🤖")
 
 st.markdown(
     """
@@ -179,7 +179,6 @@ def calculate_elder_ray(df, window=13):
 
 # ====================== REGIME ML CLASSIFIER ======================
 def train_regime_classifier(df):
-    """Train a RandomForest to classify market regime: TREND vs SIDEWAYS"""
     X = []
     y = []
     for i in range(60, len(df)-20):
@@ -190,20 +189,18 @@ def train_regime_classifier(df):
         rsi = slice_df["RSI"].iloc[-1]
         macd_hist = slice_df["MACD_Hist"].iloc[-1]
         volatility = (slice_df["High"].iloc[-20:] - slice_df["Low"].iloc[-20:]).mean() / slice_df["Close"].iloc[-1]
-        # Label: TREND jika ADX>25 dan return 20d > 2% atau < -2%
         future_returns = (df["Close"].iloc[i+20] - df["Close"].iloc[i]) / df["Close"].iloc[i]
         label = 1 if (adx > 25 and abs(future_returns) > 0.02) else 0
         X.append([adx, atr, rsi, macd_hist, volatility])
         y.append(label)
-    if len(X) < 50:
-        return None
+    if len(X) < 50: return None
     model = RandomForestClassifier(n_estimators=100, max_depth=4, random_state=42)
     model.fit(X, y)
     return model
 
 def predict_regime(df, model):
     if model is None:
-        return detect_market_regime(df)  # fallback ke rule-based
+        return detect_market_regime(df)
     slice_df = df.tail(60)
     adx = ta.trend.ADXIndicator(slice_df["High"], slice_df["Low"], slice_df["Close"], window=14).adx().iloc[-1]
     atr = slice_df["ATR"].iloc[-1]
@@ -580,7 +577,6 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
     positions = []
     equity = [balance]
     trades = []
-    last_signal = "HOLD"
     for i in range(60, len(df_test)):
         slice_df = df_test.iloc[:i+1]
         ind = get_latest_indicators(slice_df)
@@ -615,7 +611,7 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
                     shares = int(risk_amount / price_risk)
                     shares = (shares // 100) * 100
                     if shares > 0:
-                        positions.append({"entry": entry_price, "stop": stop_loss, "target": target, "shares": shares, "trailing_stop": stop_loss})
+                        positions.append({"entry": entry_price, "stop": stop_loss, "target": target, "shares": shares})
         # Manage existing position
         elif len(positions) > 0:
             pos = positions[0]
@@ -639,7 +635,6 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
             equity.append(balance)
         else:
             equity.append(balance)
-        last_signal = signal
 
     if len(trades) == 0: return None
     win_trades = [t for t in trades if t["pnl"] > 0]
@@ -655,7 +650,6 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
     avg_win = np.mean([t["pnl"] for t in trades if t["pnl"] > 0]) if win_trades else 0
     avg_loss = np.mean([t["pnl"] for t in trades if t["pnl"] < 0]) if len(trades)-len(win_trades) > 0 else 0
     rr_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
-    # Sharpe ratio
     returns = np.diff(equity) / equity[:-1]
     sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) != 0 else 0
     return {
@@ -672,28 +666,66 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
         "trade_list": trades
     }
 
-# ====================== MONTE CARLO SIMULATION ======================
-def monte_carlo_simulation(trades, n_sim=500, initial_capital=100_000_000):
+# ====================== MONTE CARLO ADVANCED ======================
+def monte_carlo_equity(trades, n_sim=500, start_balance=100_000_000):
     if not trades:
         return None
     pnls = [t["pnl"] for t in trades]
-    results = []
+    all_equity = []
+    final_balances = []
+    drawdowns = []
     for _ in range(n_sim):
         shuffled = np.random.permutation(pnls)
-        equity = initial_capital
+        equity = start_balance
         peak = equity
+        equity_curve = [equity]
         max_dd = 0
         for pnl in shuffled:
             equity += pnl
-            if equity > peak:
-                peak = equity
-            dd = (peak - equity) / peak * 100 if peak != 0 else 0
-            if dd > max_dd:
-                max_dd = dd
-        results.append(max_dd)
+            equity_curve.append(equity)
+            peak = max(peak, equity)
+            dd = (peak - equity) / peak * 100
+            max_dd = max(max_dd, dd)
+        all_equity.append(equity_curve)
+        final_balances.append(equity)
+        drawdowns.append(max_dd)
+    return {
+        "equity_curves": all_equity,
+        "final_balances": final_balances,
+        "drawdowns": drawdowns
+    }
+
+# ====================== PORTFOLIO MULTI-STOCK ENGINE ======================
+def run_portfolio_backtest(tickers, weights, model, period="1y"):
+    results = []
+    for t in tickers:
+        try:
+            df_raw = yf.download(t, period=period, progress=False, auto_adjust=False)
+            if df_raw.empty:
+                continue
+            df = calculate_all_indicators(df_raw, 10, 3.0, "Swing (Daily)")
+            ind = get_latest_indicators(df)
+            if not ind: continue
+            regime = detect_market_regime(df)  # bisa pakai rule atau ML
+            signal, score, ml_prob = final_decision_ultra(ind, 0.0, regime, weights, model, 3.0, 6.0)
+            results.append({
+                "ticker": t,
+                "price": ind["price"],
+                "score": score,
+                "signal": signal,
+                "ml_prob": ml_prob
+            })
+        except Exception as e:
+            continue
+    if not results:
+        return None
+    # Alokasi berdasarkan absolute score
+    total_score = sum(abs(r["score"]) for r in results)
+    for r in results:
+        r["weight"] = abs(r["score"]) / total_score if total_score > 0 else 0
     return results
 
-# ====================== SIMPLE BACKTEST UNTUK OPTIMIZER ======================
+# ====================== FUNGSI LAIN (BACKTEST SIMPLE, OPTIMIZER, DLL) ======================
 def run_backtest_simple(df, weights, period_days=180, risk_per_trade=0.02, threshold_buy=3.0):
     if df.empty or len(df) < period_days: return None
     df_test = df.tail(period_days).copy()
@@ -767,13 +799,12 @@ def tune_parameters(df, weights, model=None, period_days=180):
         for thresh in [2.5, 3.0, 3.5, 4.0]:
             bt = run_backtest_advanced(df, weights, detect_market_regime, period_days, risk, model, threshold_buy=thresh, threshold_strong=thresh+2)
             if bt:
-                score = bt["sharpe"] - (bt["max_drawdown"] / 100)  # Sharpe-based optimization
+                score = bt["sharpe"] - (bt["max_drawdown"] / 100)
                 if score > best_score:
                     best_score = score
                     best_params = (risk, thresh)
     return best_params, best_score
 
-# ====================== WALK-FORWARD PROFIT-BASED ======================
 def walk_forward_profit(df, train_size=200, test_size=50, use_xgb=True):
     results = []
     for start in range(0, len(df) - train_size - test_size, test_size):
@@ -781,7 +812,6 @@ def walk_forward_profit(df, train_size=200, test_size=50, use_xgb=True):
         test_df = df.iloc[start+train_size:start+train_size+test_size]
         model = train_ml_model(train_df, use_xgb)
         if model is None: continue
-        # Simulate trading on test set with fixed risk and threshold
         balance = 1_000_000
         positions = []
         for i in range(60, len(test_df)-5):
@@ -815,37 +845,6 @@ def walk_forward_profit(df, train_size=200, test_size=50, use_xgb=True):
             profit_factor = - (1_000_000 - balance) / 1_000_000
         results.append(profit_factor)
     return np.mean(results) if results else 0
-
-# ====================== MULTI-STOCK PORTFOLIO ALLOCATION ======================
-def portfolio_allocation_simple(tickers, df_dict, weights, model, threshold_buy=3.0):
-    """Alokasi berdasarkan skor dari rule engine (tanpa ML kompleks)"""
-    scores = []
-    for t in tickers:
-        df = df_dict.get(t)
-        if df is None or df.empty: continue
-        ind = get_latest_indicators(df)
-        if not ind: continue
-        regime = detect_market_regime(df)
-        _, score, _ = decision_engine_pro(ind, 0.0, regime, weights, threshold_buy, 6.0)
-        scores.append((t, score))
-    total_abs = sum(abs(s) for _, s in scores) + 1e-6
-    allocations = {t: max(0, abs(s)/total_abs) for t, s in scores}
-    return allocations
-
-def run_multi_stock_backtest(tickers, period_days=180, capital=100_000_000, risk_per_trade=0.02):
-    """Simulasi portfolio dengan rebalancing harian sederhana (tidak perfect)"""
-    results = {}
-    for t in tickers:
-        try:
-            df_raw = yf.download(t, period="1y", progress=False, auto_adjust=False)
-            if df_raw.empty: continue
-            df = calculate_all_indicators(df_raw, 10, 3.0, "Swing (Daily)")
-            bt = run_backtest_advanced(df, st.session_state.custom_weights, detect_market_regime, period_days, risk_per_trade, None, 3.0, 6.0, True)
-            if bt:
-                results[t] = bt
-        except Exception as e:
-            st.warning(f"Error for {t}: {e}")
-    return results
 
 # ====================== FUNGSI PENDUKUNG UI ======================
 def get_market_context():
@@ -956,14 +955,14 @@ def get_entry_levels_advanced(df, indicators, regime):
             target = swing_high + atr
     else:
         buy_entry = support + atr * 0.3
-        stop_loss = swing_low - ar * 0.5
-        target = resistance - ar * 0.5
+        stop_loss = swing_low - atr * 0.5
+        target = resistance - atr * 0.5
     if stop_loss >= buy_entry:
         stop_loss = buy_entry - 2 * atr
         if stop_loss < 0: stop_loss = buy_entry * 0.95
     return {"buy_entry": buy_entry, "stop_loss": stop_loss, "target": target}
 
-# ====================== MULTI-STOCK GLOBAL MODEL ======================
+# ====================== MULTI-STOCK GLOBAL MODEL (OPTIONAL) ======================
 def build_multi_stock_dataset(ticker_list, period="1y"):
     X_all, y_all = [], []
     for t in ticker_list:
@@ -992,7 +991,7 @@ def train_global_model(ticker_list, period="1y", use_xgb=True):
 
 # ====================== MAIN APP ======================
 def main():
-    st.sidebar.markdown("# 🤖 Robot Saham v8 - Hedge Fund Lite")
+    st.sidebar.markdown("# 🤖 Robot Saham v9 - Hedge Fund Complete")
     ticker_input = st.sidebar.text_input("Kode Saham", DEFAULT_TICKER)
     ticker = ticker_input.upper().strip()
     if not ticker.endswith(".JK") and not ticker.startswith("^"): ticker += ".JK"
@@ -1048,7 +1047,7 @@ def main():
     price = indicators["price"]
 
     # Regime dengan ML classifier
-    regime_model = train_regime_classifier(df)  # train on full data (cached)
+    regime_model = train_regime_classifier(df)
     if regime_model is not None:
         regime = predict_regime(df, regime_model)
     else:
@@ -1089,7 +1088,7 @@ def main():
     entry_warning = (threshold_buy-1.5) <= score < threshold_buy
     bull_prob, _ = calculate_probabilities(df)
 
-    st.title(f"🤖 {ticker} (v8 Hedge Fund Lite)")
+    st.title(f"🤖 {ticker} (v9 Hedge Fund Complete)")
     st.caption(f"Mode: {trading_mode} | Regime: {regime} (ML classifier) | MTF: {mtf_alignment:.2f} | ML Prob: {ml_prob*100:.1f}% | Model: {'XGBoost' if use_xgb else 'RandomForest'}")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("💰 Harga", f"Rp {price:,.0f}")
@@ -1185,34 +1184,49 @@ def main():
                         ax.set_xlabel("Iteration")
                         ax.set_ylabel("Balance (Rp)")
                         st.pyplot(fig)
-                        # Monte Carlo
-                        st.markdown("### 🎲 Monte Carlo Simulation")
-                        mc_runs = st.slider("Jumlah simulasi", 100, 2000, 500, 100, key="mc_slider")
-                        if st.button("Jalankan Monte Carlo", key="mc_button"):
-                            with st.spinner("Simulasi Monte Carlo..."):
-                                mc_results = monte_carlo_simulation(bt["trade_list"], mc_runs, initial_capital=1_000_000)
-                                if mc_results:
-                                    worst_dd = max(mc_results)
-                                    avg_dd = np.mean(mc_results)
-                                    median_dd = np.median(mc_results)
-                                    col_a, col_b, col_c = st.columns(3)
-                                    col_a.metric("Worst DD", f"{worst_dd:.1f}%")
-                                    col_b.metric("Average DD", f"{avg_dd:.1f}%")
-                                    col_c.metric("Median DD", f"{median_dd:.1f}%")
-                                    fig2, ax2 = plt.subplots(figsize=(8,4))
-                                    ax2.hist(mc_results, bins=30)
-                                    ax2.set_title("Distribusi Drawdown (Monte Carlo)")
-                                    ax2.set_xlabel("Drawdown (%)")
-                                    ax2.set_ylabel("Frekuensi")
-                                    st.pyplot(fig2)
-                                    prob_ruin = sum(1 for x in mc_results if x > 50) / len(mc_results) * 100
-                                    st.metric("Risk of Ruin (>50% DD)", f"{prob_ruin:.1f}%")
-                                    if worst_dd > bt["max_drawdown"] * 1.5:
-                                        st.warning("⚠️ Risiko sebenarnya jauh lebih besar dari backtest!")
-                                    if avg_dd > 25:
-                                        st.error("❌ Drawdown tinggi, sistem berisiko")
+                        
+                        # ========== MONTE CARLO ADVANCED ==========
+                        st.markdown("### 🎲 Monte Carlo Simulation (Advanced)")
+                        if bt["trade_list"]:
+                            mc_runs = st.slider("Jumlah simulasi", 100, 2000, 500, 100, key="mc_slider")
+                            if st.button("Jalankan Monte Carlo", key="mc_button"):
+                                with st.spinner("Running Monte Carlo..."):
+                                    mc = monte_carlo_equity(bt["trade_list"], n_sim=mc_runs, start_balance=100_000_000)
+                                    if mc:
+                                        worst_dd = np.max(mc["drawdowns"])
+                                        avg_dd = np.mean(mc["drawdowns"])
+                                        median_dd = np.median(mc["drawdowns"])
+                                        col_a, col_b, col_c = st.columns(3)
+                                        col_a.metric("Worst DD", f"{worst_dd:.1f}%")
+                                        col_b.metric("Average DD", f"{avg_dd:.1f}%")
+                                        col_c.metric("Median DD", f"{median_dd:.1f}%")
+                                        # Risk of ruin (kehilangan >50% modal)
+                                        ruin_prob = np.sum(np.array(mc["final_balances"]) < 50_000_000) / len(mc["final_balances"]) * 100
+                                        st.metric("💀 Risk of Ruin (loss >50%)", f"{ruin_prob:.1f}%")
+                                        # Plot equity paths (first 100)
+                                        fig_mc, ax_mc = plt.subplots(figsize=(10,5))
+                                        for i, path in enumerate(mc["equity_curves"]):
+                                            if i >= 100: break
+                                            ax_mc.plot(path, alpha=0.2)
+                                        ax_mc.set_title("Monte Carlo Equity Paths (First 100)")
+                                        ax_mc.set_xlabel("Trade Sequence")
+                                        ax_mc.set_ylabel("Balance (Rp)")
+                                        st.pyplot(fig_mc)
+                                        # Distribusi final balance
+                                        fig_mc2, ax_mc2 = plt.subplots(figsize=(8,4))
+                                        ax_mc2.hist(mc["final_balances"], bins=30)
+                                        ax_mc2.set_title("Distribusi Final Balance")
+                                        ax_mc2.set_xlabel("Balance (Rp)")
+                                        st.pyplot(fig_mc2)
+                                        # Insight
+                                        if worst_dd > bt["max_drawdown"] * 1.5:
+                                            st.warning("⚠️ Risiko sebenarnya jauh lebih besar dari backtest!")
+                                        if avg_dd > 25:
+                                            st.error("❌ Drawdown tinggi, sistem berisiko")
+                                        else:
+                                            st.success("✅ Drawdown relatif stabil")
                                     else:
-                                        st.success("✅ Drawdown relatif stabil")
+                                        st.warning("Tidak cukup data untuk Monte Carlo.")
                     else:
                         st.warning("Data tidak cukup atau tidak ada sinyal")
         with col2:
@@ -1248,21 +1262,36 @@ def main():
         if st.session_state.walk_forward_result is not None:
             st.metric("Walk-Forward PF", f"{st.session_state.walk_forward_result:.2f}")
         st.markdown("---")
-        st.subheader("🌍 Multi-Stock Portfolio")
+        st.subheader("🌍 Multi-Stock Portfolio Allocation")
         default_tickers = ["BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "UNVR.JK"]
-        tickers_input = st.text_input("Daftar kode saham (pisah koma)", value=",".join(default_tickers))
-        if st.button("Run Multi-Stock Backtest"):
+        tickers_input = st.text_input("Daftar saham (pisah koma)", value=",".join(default_tickers))
+        if st.button("Run Portfolio Allocation"):
             ticker_list = [t.strip() for t in tickers_input.split(",") if t.strip()]
-            with st.spinner("Menjalankan multi-stock backtest..."):
-                results = run_multi_stock_backtest(ticker_list, period_days=180, capital=100_000_000, risk_per_trade=0.02)
-                if results:
-                    df_res = pd.DataFrame.from_dict(results, orient='index')
-                    st.dataframe(df_res[['trades','winrate','profit_factor','sharpe','max_drawdown']])
-                    # Average metrics
-                    st.write(f"Rata-rata Winrate: {df_res['winrate'].mean():.1f}%")
-                    st.write(f"Rata-rata Sharpe: {df_res['sharpe'].mean():.2f}")
+            with st.spinner("Menghitung portfolio allocation..."):
+                portfolio = run_portfolio_backtest(ticker_list, weights, ml_model, period="1y")
+                if portfolio:
+                    df_port = pd.DataFrame(portfolio)
+                    df_port["allocation_%"] = df_port["weight"] * 100
+                    st.dataframe(df_port[["ticker", "price", "score", "signal", "allocation_%"]])
+                    fig, ax = plt.subplots()
+                    ax.pie(df_port["allocation_%"], labels=df_port["ticker"], autopct='%1.1f%%')
+                    ax.set_title("Portfolio Allocation (based on score)")
+                    st.pyplot(fig)
+                    total_score = df_port["score"].sum()
+                    st.write(f"Total portfolio score: {total_score:.2f}")
                 else:
-                    st.warning("Tidak ada data backtest yang berhasil.")
+                    st.warning("Tidak ada data portfolio yang valid.")
+        st.markdown("---")
+        st.subheader("🌍 Multi-Stock Global Model Training")
+        if st.button("Train Global Model (for ML)"):
+            ticker_list = [t.strip() for t in tickers_input.split(",") if t.strip()]
+            with st.spinner("Training global model..."):
+                global_m = train_global_model(ticker_list, period="1y", use_xgb=use_xgb)
+                if global_m:
+                    st.session_state.global_model = global_m
+                    st.success("Global model trained. You can now use it for predictions (not automatically integrated).")
+                else:
+                    st.error("Training failed. Not enough data.")
 
     with st.expander("📜 Riwayat Sinyal & Ekspor"):
         if st.session_state.signal_history:
@@ -1279,7 +1308,7 @@ def main():
             st.write(f"Jumlah saham: {shares:,} lembar")
             st.write(f"Nilai posisi: Rp {pos_value:,.0f} ({pos_value/capital*100:.1f}% dari modal)")
             st.write(f"Risiko stop loss: Rp {risk_amt:,.0f} ({risk_percent:.1f}%)")
-    st.caption("⚠️ Edukasi saja, bukan rekomendasi investasi. Backtest menggunakan risk-based, fee 0.15%, slippage 0.1%. Fitur: Monte Carlo, Sharpe optimization, ML regime classifier, multi-stock backtest.")
+    st.caption("⚠️ Edukasi saja, bukan rekomendasi investasi. Fitur: Hybrid AI, Monte Carlo advanced, portfolio allocation, Sharpe optimization, walk-forward, regime ML classifier.")
     gc.collect()
 
 if __name__ == "__main__":
