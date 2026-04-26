@@ -9,7 +9,7 @@ import gc
 import random
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import StandardScaler
 
 # XGBoost fallback
 try:
@@ -21,7 +21,7 @@ except ImportError:
 
 warnings.filterwarnings("ignore")
 
-st.set_page_config(layout="wide", page_title="Robot Saham v10 - Institutional Grade+", page_icon="🤖")
+st.set_page_config(layout="wide", page_title="Robot Saham v11 - Multi-Stock Global AI", page_icon="🤖")
 
 st.markdown(
     """
@@ -36,14 +36,14 @@ st.markdown(
 )
 
 CACHE_TTL = 300
-DEFAULT_TICKER = "JKSE.JK"
+DEFAULT_TICKER = "BBCA.JK"
 BREAKOUT_COOLDOWN_HOURS = 24
-TRADING_FEE = 0.0015      # 0.15%
-SLIPPAGE = 0.001          # 0.1%
-SPREAD = 0.001            # 0.1% spread (baru)
-MIN_VOLUME = 100_000      # likuiditas minimal (saham IDX)
+TRADING_FEE = 0.0015
+SLIPPAGE = 0.001
+SPREAD = 0.001
+MIN_VOLUME = 100_000   # opsional, bisa dimatikan
 
-# Session state (sama seperti sebelumnya)
+# session state
 if "signal_history" not in st.session_state:
     st.session_state.signal_history = []
 if "last_signal" not in st.session_state:
@@ -64,12 +64,14 @@ if "optimized_weights" not in st.session_state:
     st.session_state.optimized_weights = None
 if "global_model" not in st.session_state:
     st.session_state.global_model = None
+if "scaler" not in st.session_state:
+    st.session_state.scaler = None
 if "last_retrain" not in st.session_state:
     st.session_state.last_retrain = datetime.now()
 if "walk_forward_result" not in st.session_state:
     st.session_state.walk_forward_result = None
 
-# ====================== FUNGSI INDIKATOR (LENGKAP, SAMA) ======================
+# ====================== FUNGSI INDIKATOR (LENGKAP) ======================
 def calculate_supertrend(df, period=10, multiplier=3.0):
     high = df["High"]
     low = df["Low"]
@@ -336,7 +338,6 @@ def calculate_all_indicators(df, st_period=10, st_mult=3.0, mode="Swing (Daily)"
         df["GMMA_Spread"] = 0.0
 
     df = df.ffill().fillna(0)
-    # Feature selection: hanya kolom yang benar-benar diperlukan
     keep_cols = ["Close","High","Low","Volume","SMA20","SMA50","EMA200","RSI","MACD_Hist",
                  "Stoch_K","Stoch_D","ATR","Volume_MA","support","resistance","CMF",
                  "ST_Supertrend","ST_Dir","PSAR_Dir","OBV","OBV_MA","MFI","Williams_R","CCI",
@@ -375,7 +376,7 @@ def get_latest_indicators(df):
         "stoch_d": get_val("Stoch_D", 50.0),
         "atr": get_val("ATR", price*0.02),
         "volume_status": vol_status,
-        "volume": get_val("Volume", 0),  # tambahan volume aktual
+        "volume": get_val("Volume", 0),
         "support": get_val("support", price*0.95),
         "resistance": get_val("resistance", price*1.05),
         "supertrend_dir": get_val("ST_Dir", 0),
@@ -399,7 +400,7 @@ def get_latest_indicators(df):
         "swing_high": swing_high,
     }
 
-# ====================== FEATURE & RULE ENGINE (DENGAN INTERACTION) ======================
+# ====================== FEATURE & RULE ENGINE ======================
 def normalize_range(x, min_val, max_val):
     if max_val - min_val == 0: return 0
     return (x - min_val) / (max_val - min_val) * 2 - 1
@@ -426,7 +427,7 @@ def build_feature_vector(ind):
     elif ind["price"] < ind["swing_low"]: structure = -1
     return {"trend": trend, "momentum": momentum, "volume": volume, "smart": smart, "structure": structure}
 
-def decision_engine_pro(indicators, mtf_alignment, regime, weights, threshold_buy=3.0, threshold_strong=6.0):
+def decision_engine_pro(indicators, mtf_alignment, regime, weights, threshold_buy=2.0, threshold_strong=4.0):
     f = build_feature_vector(indicators)
     w_trend = weights["trend"]
     w_mom = weights["momentum"]
@@ -441,21 +442,17 @@ def decision_engine_pro(indicators, mtf_alignment, regime, weights, threshold_bu
         w_trend *= 0.7
         w_mom *= 1.5
 
-    # Linear score
     score = (f["trend"] * w_trend +
              f["momentum"] * w_mom +
              f["volume"] * w_vol +
              f["smart"] * w_smart +
              f["structure"] * w_struct)
 
-    # Interaction term (non-linear)
-    # Jika trend dan momentum positif -> perkuat
+    # interaction
     if f["trend"] > 0.2 and f["momentum"] > 0.2:
         score *= 1.2
-    # Jika trend negatif dan momentum negatif -> perkuat sell
     elif f["trend"] < -0.2 and f["momentum"] < -0.2:
         score *= 1.2
-    # Jika RSI overbought tapi trend naik -> warnai (kurangi sedikit)
     if indicators["rsi"] > 70 and f["trend"] > 0:
         score *= 0.9
 
@@ -481,19 +478,17 @@ def decision_engine_pro(indicators, mtf_alignment, regime, weights, threshold_bu
     else:
         return "HOLD", score, "LOW"
 
-# ====================== ML MODEL (RAW FEATURES + MTF) ======================
+# ====================== MULTI-STOCK GLOBAL MODEL ======================
 def build_ml_dataset_raw(df, mtf_array=None):
-    """
-    mtf_array: list atau array of mtf_alignment values sepanjang df (opsional)
-    """
     X = []
     y = []
+    if mtf_array is None:
+        mtf_array = np.zeros(len(df))
     for i in range(60, len(df)-5):
         slice_df = df.iloc[:i+1]
         ind = get_latest_indicators(slice_df)
         if not ind: continue
-        # Ambil MTF alignment jika tersedia, else 0
-        mtf_val = mtf_array[i] if mtf_array is not None and i < len(mtf_array) else 0.0
+        mtf_val = mtf_array[i] if i < len(mtf_array) else 0.0
         features = [
             ind["rsi"],
             ind["macd_hist"],
@@ -503,42 +498,52 @@ def build_ml_dataset_raw(df, mtf_array=None):
             ind["gmma_spread"],
             ind["cci"],
             ind["williams_r"],
-            mtf_val  # <--- MTF sebagai feature
+            mtf_val
         ]
-        # Label dengan threshold 2% (signifikan)
         future_return = (df["Close"].iloc[i+5] - df["Close"].iloc[i]) / df["Close"].iloc[i]
         if future_return > 0.02:
             label = 1
         elif future_return < -0.02:
-            label = 0   # atau -1, tapi binary classification lebih sederhana
+            label = 0
         else:
-            continue   # skip periode flat (noise)
+            continue
         X.append(features)
         y.append(label)
     return np.array(X), np.array(y)
 
-def train_ml_model(df, mtf_series=None, use_xgb=True):
-    """
-    mtf_series: Series atau list yang berisi mtf_alignment untuk setiap baris df (panjang sama dengan df)
-    """
-    if mtf_series is None:
-        mtf_array = np.zeros(len(df))
-    else:
-        mtf_array = mtf_series.values if hasattr(mtf_series, 'values') else np.array(mtf_series)
-    X, y = build_ml_dataset_raw(df, mtf_array)
-    if len(X) < 50: return None
+def train_global_model(ticker_list, period="1y", use_xgb=True):
+    X_all = []
+    y_all = []
+    for ticker in ticker_list:
+        try:
+            df_raw = yf.download(ticker, period=period, progress=False, auto_adjust=False)
+            if df_raw.empty: continue
+            df = calculate_all_indicators(df_raw, 10, 3.0, "Swing (Daily)")
+            # MTF dianggap 0 untuk training (bisa ditingkatkan nanti)
+            X, y = build_ml_dataset_raw(df, mtf_array=np.zeros(len(df)))
+            if len(X) > 0:
+                X_all.extend(X)
+                y_all.extend(y)
+        except Exception as e:
+            st.warning(f"Gagal load {ticker} untuk training: {e}")
+    if len(X_all) < 200:
+        return None, None
+    X_all = np.array(X_all)
+    y_all = np.array(y_all)
+    scaler = StandardScaler()
+    X_all = scaler.fit_transform(X_all)
     if use_xgb and XGB_AVAILABLE:
         model = XGBClassifier(n_estimators=200, max_depth=4, learning_rate=0.05,
                               subsample=0.8, colsample_bytree=0.8,
                               eval_metric="logloss", random_state=42)
     else:
-        model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
-    model.fit(X, y)
-    return model
+        model = RandomForestClassifier(n_estimators=200, max_depth=5, random_state=42)
+    model.fit(X_all, y_all)
+    return model, scaler
 
-def ml_predict(model, indicators, mtf_val):
+def ml_predict(model, scaler, indicators, mtf_val):
     if model is None: return 0.5
-    features = [
+    features = [[
         indicators["rsi"],
         indicators["macd_hist"],
         indicators["cmf"],
@@ -548,29 +553,18 @@ def ml_predict(model, indicators, mtf_val):
         indicators["cci"],
         indicators["williams_r"],
         mtf_val
-    ]
-    X = np.array([features])
-    prob = model.predict_proba(X)[0][1]
+    ]]
+    if scaler is not None:
+        features = scaler.transform(features)
+    prob = model.predict_proba(features)[0][1]
     return prob
 
-def final_decision_ultra(indicators, mtf, regime, weights, model, threshold_buy=3.0, threshold_strong=6.0):
-    # Rule-based score
+def final_decision_ultra(indicators, mtf, regime, weights, model, scaler, threshold_buy=2.0, threshold_strong=4.0):
     signal, score, _ = decision_engine_pro(indicators, mtf, regime, weights, threshold_buy, threshold_strong)
-    # ML probability (dengan MTF)
-    ml_prob = ml_predict(model, indicators, mtf)
-    # ML sebagai filter utama: entry hanya jika ml_prob > 0.6 dan rule score positif
-    if signal in ["BUY", "STRONG BUY"] and ml_prob < 0.6:
-        signal = "HOLD"
-        score = score * 0.5  # turunkan skor
-    elif signal in ["SELL", "STRONG SELL"] and ml_prob > 0.4:
-        signal = "HOLD"
-        score = score * 0.5
-    else:
-        # adjustment kecil
-        ml_weight = min(1.5, abs(score)/3) if abs(score) > 0 else 1.0
-        score += (ml_prob - 0.5) * 6 * ml_weight
-        if ml_prob > 0.7: score += 1.0
-        elif ml_prob < 0.3: score -= 1.0
+    ml_prob = ml_predict(model, scaler, indicators, mtf)
+    # ML sebagai booster
+    boost = (ml_prob - 0.5) * 2.5
+    score += boost
     score = max(-10, min(10, score))
     if score >= threshold_strong:
         return "STRONG BUY", score, ml_prob
@@ -583,56 +577,26 @@ def final_decision_ultra(indicators, mtf, regime, weights, model, threshold_buy=
     else:
         return "HOLD", score, ml_prob
 
-# ====================== BACKTEST DENGAN SPREAD & LIQUIDITY FILTER ======================
-def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_trade=0.02, model=None,
-                          threshold_buy=3.0, threshold_strong=6.0, use_trailing=True):
+# ====================== BACKTEST (SEDERHANA UNTUK DEMO) ======================
+def run_backtest_simple_for_optimize(df, weights, period_days=180, risk_per_trade=0.02, threshold_buy=2.0):
     if df.empty or len(df) < period_days: return None
     df_test = df.tail(period_days).copy()
     balance = 100_000_000
     positions = []
-    equity = [balance]
     trades = []
-    last_signal = "HOLD"
-
-    # Pre-calculate MTF alignment for each index (opsional, tapi kita bisa gunakan 0 untuk backtest sederhana)
-    # Untuk backtest, kita tidak punya MTF realtime, pakai 0
-    mtf_series = np.zeros(len(df_test))
-
-    for idx in range(60, len(df_test)):
-        i = idx
+    equity = [balance]
+    for i in range(60, len(df_test)):
         slice_df = df_test.iloc[:i+1]
         ind = get_latest_indicators(slice_df)
-        if not ind:
-            equity.append(balance); continue
-        regime = regime_func(slice_df)
-        # Cek likuiditas: volume minimal
-        if ind.get("volume", 0) < MIN_VOLUME:
-            equity.append(balance); continue
-        signal, score, ml_prob = final_decision_ultra(ind, 0.0, regime, weights, model, threshold_buy, threshold_strong)
-        current_price = ind["price"]
-        atr = ind["atr"]
-        # Exit by signal
-        if len(positions) > 0 and signal in ["SELL", "STRONG SELL"]:
-            pos = positions[0]
-            # Spread dikenakan saat exit juga
-            exit_price = current_price * (1 - SPREAD) if current_price < pos["entry"] else current_price * (1 + SPREAD)
-            exit_price = exit_price * (1 - SLIPPAGE) if current_price < pos["entry"] else exit_price * (1 + SLIPPAGE)
-            gross_pnl = (exit_price - pos["entry"]) * pos["shares"]
-            fee = (pos["entry"] * pos["shares"] + exit_price * pos["shares"]) * TRADING_FEE
-            pnl = gross_pnl - fee
-            balance += pnl
-            trades.append({"entry": pos["entry"], "exit": exit_price, "pnl": pnl, "shares": pos["shares"]})
-            positions.pop()
-        # Entry
+        if not ind: continue
+        regime = detect_market_regime(slice_df)
+        signal, score, _ = decision_engine_pro(ind, 0.0, regime, weights, threshold_buy, threshold_buy+2)
         if signal in ["BUY", "STRONG BUY"] and len(positions)==0:
             if ind["rsi"] > 70 or ind["cmf"] < 0: continue
-            # Spread saat entry
-            entry_price = current_price * (1 + SPREAD)  # beli kena spread
-            entry_price = entry_price * (1 + SLIPPAGE)
+            entry_price = ind["price"] * (1 + SPREAD) * (1 + SLIPPAGE)
             stop_loss = ind["swing_low"] - ind["atr"] * 0.5
             if stop_loss >= entry_price:
                 stop_loss = entry_price - 2 * ind["atr"]
-            target = ind["resistance"]
             if stop_loss < entry_price:
                 risk_amount = balance * risk_per_trade
                 price_risk = entry_price - stop_loss
@@ -640,129 +604,47 @@ def run_backtest_advanced(df, weights, regime_func, period_days=180, risk_per_tr
                     shares = int(risk_amount / price_risk)
                     shares = (shares // 100) * 100
                     if shares > 0:
-                        positions.append({"entry": entry_price, "stop": stop_loss, "target": target, "shares": shares, "trailing_stop": stop_loss})
-        # Manage existing position
+                        positions.append({"entry": entry_price, "stop": stop_loss, "shares": shares})
         elif len(positions) > 0:
             pos = positions[0]
-            if use_trailing:
-                new_stop = current_price - 2 * atr
-                if new_stop > pos["stop"]:
-                    pos["stop"] = new_stop
-            exit_signal = False
+            current_price = ind["price"]
             if current_price <= pos["stop"]:
-                exit_signal = True
-            elif current_price >= pos["target"]:
-                exit_signal = True
-            if exit_signal:
-                exit_price = current_price * (1 - SPREAD) if current_price < pos["entry"] else current_price * (1 + SPREAD)
-                exit_price = exit_price * (1 - SLIPPAGE) if current_price < pos["entry"] else exit_price * (1 + SLIPPAGE)
+                exit_price = current_price * (1 - SPREAD) * (1 - SLIPPAGE)
                 gross_pnl = (exit_price - pos["entry"]) * pos["shares"]
                 fee = (pos["entry"] * pos["shares"] + exit_price * pos["shares"]) * TRADING_FEE
                 pnl = gross_pnl - fee
                 balance += pnl
-                trades.append({"entry": pos["entry"], "exit": exit_price, "pnl": pnl, "shares": pos["shares"]})
+                trades.append(pnl)
                 positions.pop()
-            equity.append(balance)
-        else:
-            equity.append(balance)
-        last_signal = signal
-
+        equity.append(balance)
     if len(trades) == 0: return None
-    win_trades = [t for t in trades if t["pnl"] > 0]
-    winrate = len(win_trades)/len(trades)*100
-    total_profit = sum(t["pnl"] for t in trades if t["pnl"] > 0)
-    total_loss = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
-    profit_factor = total_profit/total_loss if total_loss != 0 else float("inf")
+    winrate = sum(1 for p in trades if p>0)/len(trades)*100
+    total_profit = sum(p for p in trades if p>0)
+    total_loss = abs(sum(p for p in trades if p<0))
+    profit_factor = total_profit/total_loss if total_loss != 0 else 999
     peak = equity[0]
     max_dd = 0.0
     for val in equity:
         if val > peak: peak = val
         if peak != 0: dd = (peak-val)/peak*100; max_dd = max(max_dd, dd)
-    avg_win = np.mean([t["pnl"] for t in trades if t["pnl"] > 0]) if win_trades else 0
-    avg_loss = np.mean([t["pnl"] for t in trades if t["pnl"] < 0]) if len(trades)-len(win_trades) > 0 else 0
-    rr_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
     returns = np.diff(equity) / equity[:-1]
     sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) != 0 else 0
-    return {
-        "trades": len(trades),
-        "winrate": winrate,
-        "profit_factor": profit_factor,
-        "max_drawdown": max_dd,
-        "final_balance": balance,
-        "equity": equity,
-        "avg_win": avg_win,
-        "avg_loss": avg_loss,
-        "rr_ratio": rr_ratio,
-        "sharpe": sharpe,
-        "trade_list": trades
-    }
+    return {"winrate": winrate, "profit_factor": profit_factor, "max_drawdown": max_dd, "sharpe": sharpe}
 
-# ====================== MONTE CARLO, PORTFOLIO, DLL (SAMA SEPERTI SEBELUMNYA) ======================
-def monte_carlo_equity(trades, n_sim=500, start_balance=100_000_000):
-    if not trades or len(trades) < 5:
-        return None
-    pnls = [t["pnl"] for t in trades]
-    all_equity = []
-    final_balances = []
-    drawdowns = []
-    for _ in range(n_sim):
-        shuffled = np.random.permutation(pnls)
-        equity = start_balance
-        peak = equity
-        equity_curve = [equity]
-        max_dd = 0
-        for pnl in shuffled:
-            equity += pnl
-            equity_curve.append(equity)
-            if equity > peak:
-                peak = equity
-            dd = (peak - equity) / peak * 100 if peak != 0 else 0
-            if dd > max_dd:
-                max_dd = dd
-        all_equity.append(equity_curve)
-        final_balances.append(equity)
-        drawdowns.append(max_dd)
-    return {
-        "equity_curves": all_equity,
-        "final_balances": final_balances,
-        "drawdowns": drawdowns
-    }
+def optimize_weights(df, trials=20):
+    best_score = -999
+    best_weights = None
+    for _ in range(trials):
+        w = {k: random.uniform(0.5, 3.0) for k in ["trend","momentum","volume","smart_money","structure"]}
+        bt = run_backtest_simple_for_optimize(df, w, 180, 0.02, 2.0)
+        if bt:
+            score = bt["sharpe"] - (bt["max_drawdown"] / 100)
+            if score > best_score:
+                best_score = score
+                best_weights = w
+    return best_weights
 
-def run_portfolio_backtest(tickers, weights, model, period="1y", threshold_buy=3.0, threshold_strong=6.0):
-    results = []
-    scores = []
-    for t in tickers:
-        try:
-            df_raw = yf.download(t, period=period, progress=False, auto_adjust=False)
-            if df_raw.empty:
-                continue
-            df = calculate_all_indicators(df_raw, 10, 3.0, "Swing (Daily)")
-            ind = get_latest_indicators(df)
-            regime = detect_market_regime(df)
-            signal, score, ml_prob = final_decision_ultra(ind, 0.0, regime, weights, model, threshold_buy, threshold_strong)
-            scores.append((t, score, ind["price"]))
-        except Exception as e:
-            st.warning(f"Error untuk {t}: {e}")
-            continue
-    if not scores:
-        return None
-    total_score = sum(abs(s) for _, s, _ in scores)
-    portfolio = []
-    for t, s, price in scores:
-        if total_score == 0:
-            weight = 0
-        else:
-            weight = abs(s) / total_score
-        portfolio.append({
-            "ticker": t,
-            "score": s,
-            "weight": weight,
-            "price": price,
-            "allocation_%": weight * 100
-        })
-    return portfolio
-
-# ====================== FUNGSI PENDUKUNG (IHSG, dll) ======================
+# ====================== FUNGSI PENDUKUNG UI ======================
 def get_market_context():
     try:
         ihsg = yf.download("^JKSE", period="5d", progress=False, auto_adjust=False)
@@ -801,10 +683,10 @@ def show_breakout_alert(breakout, last_time):
 
 def get_signal_interpretation(signal):
     interpretations = {
-        "STRONG BUY": "📌 **Peluang naik sangat kuat.** Hybrid AI + rule engine + ML filter mendukung.",
-        "BUY": "📌 **Kondisi cukup baik.** Masih ada ruang naik, tetapi perlu konfirmasi.",
-        "HOLD": "📌 **Tidak ada sinyal jelas.** Tunggu breakout atau breakdown.",
-        "SELL": "📌 **Tekanan turun mulai terlihat.** Pertimbangkan exit bertahap.",
+        "STRONG BUY": "📌 **Peluang naik sangat kuat.** Hybrid AI + global model.",
+        "BUY": "📌 **Kondisi cukup baik.** Masih ada ruang naik.",
+        "HOLD": "📌 **Tidak ada sinyal jelas.** Tunggu breakout.",
+        "SELL": "📌 **Tekanan turun mulai terlihat.** Pertimbangkan exit.",
         "STRONG SELL": "📌 **Kondisi lemah.** Risiko besar, hindari entry.",
     }
     return interpretations.get(signal, "Netral.")
@@ -878,149 +760,22 @@ def get_entry_levels_advanced(df, indicators, regime):
         if stop_loss < 0: stop_loss = buy_entry * 0.95
     return {"buy_entry": buy_entry, "stop_loss": stop_loss, "target": target}
 
-# ====================== OPTIMASI & WALK-FORWARD (SEDERHANA) ======================
-def run_backtest_simple(df, weights, period_days=180, risk_per_trade=0.02, threshold_buy=3.0):
-    # versi sederhana untuk optimasi
-    if df.empty or len(df) < period_days: return None
-    df_test = df.tail(period_days).copy()
-    balance = 100_000_000
-    positions = []
-    trades = []
-    equity = [balance]
-    for i in range(60, len(df_test)):
-        slice_df = df_test.iloc[:i+1]
-        ind = get_latest_indicators(slice_df)
-        if not ind: continue
-        regime = detect_market_regime(slice_df)
-        signal, score, _ = decision_engine_pro(ind, 0.0, regime, weights, threshold_buy, 6.0)
-        if signal in ["BUY", "STRONG BUY"] and len(positions)==0:
-            if ind["rsi"] > 70 or ind["cmf"] < 0: continue
-            entry_price = ind["price"] * (1 + SPREAD) * (1 + SLIPPAGE)
-            stop_loss = ind["swing_low"] - ind["atr"] * 0.5
-            if stop_loss >= entry_price:
-                stop_loss = entry_price - 2 * ind["atr"]
-            if stop_loss < entry_price:
-                risk_amount = balance * risk_per_trade
-                price_risk = entry_price - stop_loss
-                if price_risk > 0:
-                    shares = int(risk_amount / price_risk)
-                    shares = (shares // 100) * 100
-                    if shares > 0:
-                        positions.append({"entry": entry_price, "stop": stop_loss, "shares": shares})
-        elif len(positions) > 0:
-            pos = positions[0]
-            current_price = ind["price"]
-            if current_price <= pos["stop"]:
-                exit_price = current_price * (1 - SPREAD) * (1 - SLIPPAGE)
-                gross_pnl = (exit_price - pos["entry"]) * pos["shares"]
-                fee = (pos["entry"] * pos["shares"] + exit_price * pos["shares"]) * TRADING_FEE
-                pnl = gross_pnl - fee
-                balance += pnl
-                trades.append(pnl)
-                positions.pop()
-        equity.append(balance)
-    if len(trades) == 0: return None
-    winrate = sum(1 for p in trades if p>0)/len(trades)*100
-    total_profit = sum(p for p in trades if p>0)
-    total_loss = abs(sum(p for p in trades if p<0))
-    profit_factor = total_profit/total_loss if total_loss != 0 else 999
-    peak = equity[0]
-    max_dd = 0.0
-    for val in equity:
-        if val > peak: peak = val
-        if peak != 0: dd = (peak-val)/peak*100; max_dd = max(max_dd, dd)
-    returns = np.diff(equity) / equity[:-1]
-    sharpe = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) != 0 else 0
-    return {"winrate": winrate, "profit_factor": profit_factor, "max_drawdown": max_dd, "sharpe": sharpe}
-
-def optimize_weights(df, trials=20):
-    best_score = -999
-    best_weights = None
-    for _ in range(trials):
-        w = {k: random.uniform(0.5, 3.0) for k in ["trend","momentum","volume","smart_money","structure"]}
-        bt = run_backtest_simple(df, w, 180, 0.02, 3.0)
-        if bt:
-            score = bt["sharpe"] - (bt["max_drawdown"] / 100)
-            if score > best_score:
-                best_score = score
-                best_weights = w
-    return best_weights
-
-def tune_parameters(df, weights, model=None, period_days=180):
-    best_score = -999
-    best_params = None
-    for risk in [0.01, 0.015, 0.02]:
-        for thresh in [2.5, 3.0, 3.5, 4.0]:
-            bt = run_backtest_advanced(df, weights, detect_market_regime, period_days, risk, model, threshold_buy=thresh, threshold_strong=thresh+2)
-            if bt:
-                score = bt["sharpe"] - (bt["max_drawdown"] / 100)
-                if score > best_score:
-                    best_score = score
-                    best_params = (risk, thresh)
-    return best_params, best_score
-
-def walk_forward_profit(df, train_size=200, test_size=50, use_xgb=True):
-    results = []
-    tscv = TimeSeriesSplit(n_splits=3)  # cross-validation time series sederhana
-    for train_index, test_index in tscv.split(df):
-        if len(train_index) < train_size or len(test_index) < test_size:
-            continue
-        train_df = df.iloc[train_index]
-        test_df = df.iloc[test_index]
-        # Untuk MTF, kita tidak punya di backtest, pakai 0
-        model = train_ml_model(train_df, mtf_series=None, use_xgb=use_xgb)
-        if model is None: continue
-        balance = 1_000_000
-        positions = []
-        for idx in range(60, len(test_df)-5):
-            i = test_df.index[idx]  # butuh integer index
-            slice_df = test_df.iloc[:idx+1]
-            ind = get_latest_indicators(slice_df)
-            if not ind: continue
-            regime = detect_market_regime(slice_df)
-            # mtf = 0
-            signal, score, _ = final_decision_ultra(ind, 0.0, regime, st.session_state.custom_weights, model, 3.0, 6.0)
-            if signal in ["BUY","STRONG BUY"] and len(positions)==0:
-                if ind["rsi"] > 70 or ind["cmf"] < 0: continue
-                entry = ind["price"] * (1+SPREAD) * (1+SLIPPAGE)
-                stop = ind["swing_low"] - ind["atr"]*0.5
-                if stop >= entry: stop = entry - 2*ind["atr"]
-                if stop < entry:
-                    risk_amount = balance * 0.02
-                    price_risk = entry - stop
-                    shares = int(risk_amount/price_risk)
-                    shares = (shares//100)*100
-                    if shares>0:
-                        positions.append({"entry": entry, "stop": stop, "shares": shares})
-            elif len(positions)>0:
-                pos = positions[0]
-                if ind["price"] <= pos["stop"]:
-                    exit_price = ind["price"] * (1-SPREAD) * (1-SLIPPAGE)
-                    pnl = (exit_price - pos["entry"]) * pos["shares"] * (1 - TRADING_FEE*2)
-                    balance += pnl
-                    positions.pop()
-        if balance > 1_000_000:
-            profit_factor = balance / 1_000_000
-        else:
-            profit_factor = - (1_000_000 - balance) / 1_000_000
-        results.append(profit_factor)
-    return np.mean(results) if results else 0
-
 # ====================== MAIN APP ======================
 def main():
-    st.sidebar.markdown("# 🤖 Robot Saham v10 - Institutional Grade+")
-    ticker_input = st.sidebar.text_input("Kode Saham", DEFAULT_TICKER)
+    st.sidebar.markdown("# 🤖 Robot Saham v11 - Multi-Stock Global AI")
+    
+    # Pilih saham atau indeks
+    ticker_input = st.sidebar.text_input("Kode Saham / Indeks", DEFAULT_TICKER)
     ticker = ticker_input.upper().strip()
-    if not ticker.endswith(".JK") and not ticker.startswith("^"): ticker += ".JK"
+    if not ticker.endswith(".JK") and not ticker.startswith("^"):
+        ticker += ".JK"
     timeframe = st.sidebar.selectbox("Timeframe", ["1d","1wk","1mo"], index=0)
-    trading_mode = st.sidebar.selectbox("Mode Trading", ["Scalping (5-15 menit)","Intraday (30 menit - 4 jam)","Swing (Daily)","Position (Weekly - Monthly)"], index=2)
+    trading_mode = st.sidebar.selectbox("Mode Trading", ["Swing (Daily)"], index=0)  # disederhanakan
     st.session_state.trading_mode = trading_mode
-    if trading_mode in ["Scalping (5-15 menit)","Intraday (30 menit - 4 jam)"]:
-        st.sidebar.warning("⚠️ Mode ini menggunakan data **daily** karena yfinance tidak menyediakan data menit yang stabil.")
-    if trading_mode == "Scalping (5-15 menit)": st_period, st_mult = 7, 2.5
-    elif trading_mode == "Intraday (30 menit - 4 jam)": st_period, st_mult = 8, 2.7
-    elif trading_mode == "Swing (Daily)": st_period, st_mult = 10, 3.0
-    else: st_period, st_mult = 20, 3.0
+    if trading_mode == "Swing (Daily)":
+        st_period, st_mult = 10, 3.0
+    else:
+        st_period, st_mult = 10, 3.0
     ui_mode = st.sidebar.selectbox("Mode Tampilan", ["Simple (Recommended)","Advanced (Full Indicators)"], index=0)
 
     with st.sidebar.expander("⚙️ Bobot Indikator (mempengaruhi keputusan)"):
@@ -1033,8 +788,9 @@ def main():
         if st.button("Simpan Bobot"): st.session_state.custom_weights = weights
     weights = st.session_state.custom_weights.copy()
 
-    # Auto retrain
-    def should_retrain(): return (datetime.now() - st.session_state.last_retrain) > timedelta(days=7)
+    # Auto retrain global model setiap 7 hari
+    def should_retrain():
+        return (datetime.now() - st.session_state.last_retrain) > timedelta(days=7)
     if should_retrain():
         st.cache_resource.clear()
         st.session_state.last_retrain = datetime.now()
@@ -1045,13 +801,33 @@ def main():
         st.sidebar.warning("XGBoost tidak terinstal, gunakan RandomForest.")
         use_xgb = False
 
+    # Tombol untuk melatih global model (multi-stock)
+    if st.sidebar.button("🔥 Train Global Model (Multi-Stock)"):
+        default_tickers = ["BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "UNVR.JK"]
+        tickers_input = st.sidebar.text_input("Daftar saham training (pisah koma)", value=",".join(default_tickers))
+        ticker_list = [t.strip() for t in tickers_input.split(",") if t.strip()]
+        with st.spinner("Training global model (bisa makan waktu)..."):
+            model, scaler = train_global_model(ticker_list, period="1y", use_xgb=use_xgb)
+            if model is not None:
+                st.session_state.global_model = model
+                st.session_state.scaler = scaler
+                st.success("Global model berhasil dilatih!")
+            else:
+                st.error("Gagal training global model (data tidak cukup).")
+    
+    model = st.session_state.global_model
+    scaler = st.session_state.scaler
+    if model is None:
+        st.sidebar.warning("⚠️ Global model belum siap. Klik 'Train Global Model' terlebih dahulu.")
+        st.stop()
+
     if st.sidebar.button("🔄 Refresh Data"):
         st.cache_data.clear()
-        st.cache_resource.clear()
         st.rerun()
 
+    # Download data untuk ticker yang dipilih
     with st.spinner(f"Memuat {ticker}..."):
-        period = "2y" if trading_mode == "Position (Weekly - Monthly)" else "1y"
+        period = "1y"
         df_raw = yf.download(ticker, period=period, interval=timeframe, progress=False, auto_adjust=False)
     if df_raw.empty:
         st.error(f"Data {ticker} tidak tersedia")
@@ -1064,7 +840,7 @@ def main():
     price = indicators["price"]
     regime = detect_market_regime(df)
 
-    # MTF alignment
+    # MTF alignment (opsional, tidak dipakai di ML karena training tanpa MTF, tapi tetap untuk rule)
     def safe_load(ticker, period, interval):
         try:
             d = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False)
@@ -1077,22 +853,26 @@ def main():
     df_monthly_mtf = safe_load(ticker, "3y", "1mo")
     mtf_alignment = get_mtf_alignment(df_daily_mtf, df_weekly_mtf, df_monthly_mtf)
 
-    # Train ML model dengan MTF (untuk setiap baris kita butuh series mtf, tapi disini kita hanya punya satu nilai saat ini, tidak historis)
-    # Untuk training kita butuh mtf historis. Kita buat mtf series dari data harian, mingguan, bulanan yang sudah dihitung.
-    # Namun karena kompleks, kita skip dulu dan gunakan mtf=0 untuk training. Alternatif: hitung mtf untuk setiap baris di df.
-    # Untuk penyederhanaan, kita tidak masukkan MTF ke training karena butuh komputasi ulang. Tapi kita sudah menambahkan MTF sebagai feature di prediction.
-    # Agar konsisten, kita latih model tanpa MTF (mtf_series=None)
-    @st.cache_resource
-    def load_model_for_ticker(_df, _use_xgb):
-        return train_ml_model(_df, mtf_series=None, use_xgb=_use_xgb)
-    ml_model = load_model_for_ticker(df, use_xgb)
+    # Parameter threshold lebih longgar
+    threshold_buy = st.sidebar.slider("Threshold BUY", 1.0, 5.0, 2.0, 0.5)
+    threshold_strong = st.sidebar.slider("Threshold STRONG BUY", 3.0, 8.0, 4.0, 0.5)
 
-    # Parameter threshold
-    st.sidebar.subheader("🎚️ Parameter Entry")
-    threshold_buy = st.sidebar.slider("Threshold BUY", 1.0, 5.0, 3.0, 0.5)
-    threshold_strong = st.sidebar.slider("Threshold STRONG BUY", 4.0, 8.0, 6.0, 0.5)
+    # Debug output untuk memeriksa variasi
+    with st.expander("🔍 Debug Info (variasi sinyal)"):
+        if st.checkbox("Tampilkan detail untuk saham ini"):
+            st.write(f"Ticker: {ticker}")
+            st.write(f"Regime: {regime}")
+            st.write(f"RSI: {indicators['rsi']:.1f}")
+            st.write(f"MACD hist: {indicators['macd_hist']:.4f}")
+            st.write(f"CMF: {indicators['cmf']:.3f}")
+            st.write(f"ATR: {indicators['atr']:.2f}")
+            st.write(f"Volume status: {indicators['volume_status']}")
+            st.write(f"GMMA spread: {indicators['gmma_spread']:.2f}")
+            st.write(f"CCI: {indicators['cci']:.1f}")
+            st.write(f"Williams %R: {indicators['williams_r']:.1f}")
 
-    signal, score, ml_prob = final_decision_ultra(indicators, mtf_alignment, regime, weights, ml_model, threshold_buy, threshold_strong)
+    # Final decision menggunakan global model + scaler
+    signal, score, ml_prob = final_decision_ultra(indicators, mtf_alignment, regime, weights, model, scaler, threshold_buy, threshold_strong)
     show_toast_if_changed(signal, st.session_state.last_signal)
     st.session_state.last_signal = signal
     log_signal(ticker, signal, score, price)
@@ -1101,11 +881,11 @@ def main():
     show_breakout_alert(breakout, st.session_state.last_breakout_notify_time)
     entry_levels = get_entry_levels_advanced(df, indicators, regime)
     entry_eligible = score >= threshold_buy
-    entry_warning = (threshold_buy-1.5) <= score < threshold_buy
+    entry_warning = (threshold_buy-1.0) <= score < threshold_buy
     bull_prob, _ = calculate_probabilities(df)
 
-    st.title(f"🤖 {ticker} (v10 Institutional Grade+)")
-    st.caption(f"Mode: {trading_mode} | Regime: {regime} | MTF: {mtf_alignment:.2f} | ML Prob: {ml_prob*100:.1f}% | Model: {'XGBoost' if use_xgb else 'RandomForest'}")
+    st.title(f"🤖 {ticker} (v11 Global AI)")
+    st.caption(f"Regime: {regime} | MTF: {mtf_alignment:.2f} | ML Prob: {ml_prob*100:.1f}% | Model Global dengan Normalisasi")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("💰 Harga", f"Rp {price:,.0f}")
     col2.metric("📊 RSI", f"{indicators['rsi']:.1f}")
@@ -1140,7 +920,7 @@ def main():
 
     if ui_mode == "Advanced (Full Indicators)":
         st.markdown("---")
-        st.caption("📊 Indikator Lanjutan (semua masih ada)")
+        st.caption("📊 Indikator Lanjutan")
         adv_cols = st.columns(5)
         adv_cols[0].metric("Stochastic K", f"{indicators['stoch_k']:.1f}")
         adv_cols[1].metric("Williams %R", f"{indicators['williams_r']:.1f}")
@@ -1153,12 +933,12 @@ def main():
         adv_cols2[2].metric("Elder Bull", f"{indicators['elder_bull']:.0f}")
         adv_cols2[3].metric("GMMA Spread", f"{indicators['gmma_spread']:.0f}")
 
-    if entry_eligible: st.success(f"🟢 **ENTRY LAYAK** (Skor: {score:.1f} | Regime: {regime} | ML: {ml_prob*100:.0f}%)")
+    if entry_eligible: st.success(f"🟢 **ENTRY LAYAK** (Skor: {score:.1f} | ML: {ml_prob*100:.0f}%)")
     elif entry_warning: st.warning(f"🟡 **ENTRY HATI-HATI** (Skor: {score:.1f})")
     else: st.error(f"🔴 **TIDAK LAYAK ENTRY** (Skor: {score:.1f})")
 
     with st.expander("📖 Arti Sinyal"): st.markdown(get_signal_interpretation(signal))
-    with st.expander("📋 Detail Analisis (Hybrid AI Ultra)"):
+    with st.expander("📋 Detail Analisis"):
         fv = build_feature_vector(indicators)
         st.write(f"- Regime: {regime}")
         st.write(f"- Trend group: {fv['trend']:.2f}")
@@ -1166,100 +946,18 @@ def main():
         st.write(f"- Volume group: {fv['volume']:.2f}")
         st.write(f"- Smart money: {fv['smart']:.2f}")
         st.write(f"- Structure: {fv['structure']:.2f}")
-        st.write(f"- MTF alignment: {mtf_alignment:.2f} (gate factor & ML feature)")
-        st.write(f"- ML probability (raw features + MTF): {ml_prob*100:.1f}%")
+        st.write(f"- MTF alignment: {mtf_alignment:.2f}")
+        st.write(f"- ML probability (global model): {ml_prob*100:.1f}%")
         st.write(f"- Final Score: {score:.2f}")
-        st.write(f"- Threshold BUY: {threshold_buy}, STRONG: {threshold_strong}")
 
-    with st.expander("📊 Backtest & Risk Analysis"):
-        col1, col2 = st.columns(2)
-        with col1:
-            risk_bt = st.number_input("Risk per trade (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.5) / 100.0
-            trailing = st.checkbox("Gunakan Trailing Stop", value=True)
-            if st.button("Jalankan Backtest"):
-                with st.spinner("Menjalankan backtest..."):
-                    bt = run_backtest_advanced(df, weights, detect_market_regime, 180, risk_bt, ml_model, threshold_buy, threshold_strong, use_trailing=trailing)
-                    if bt:
-                        st.write(f"Jumlah trade: {bt['trades']}")
-                        st.write(f"Winrate: {bt['winrate']:.1f}%")
-                        st.write(f"Profit Factor: {bt['profit_factor']:.2f}")
-                        st.write(f"Sharpe Ratio: {bt['sharpe']:.2f}")
-                        st.write(f"Max Drawdown: {bt['max_drawdown']:.1f}%")
-                        st.write(f"Final Balance: Rp {bt['final_balance']:,.0f}")
-                        st.write(f"Avg Win: Rp {bt['avg_win']:,.0f}")
-                        st.write(f"Avg Loss: Rp {bt['avg_loss']:,.0f}")
-                        st.write(f"Risk-Reward Ratio: {bt['rr_ratio']:.2f}")
-                        if bt["rr_ratio"] < 1: st.warning("⚠️ Risk-Reward buruk. Perlebar target atau perketat stop.")
-                        if bt["winrate"] < 50: st.warning("⚠️ Winrate rendah, filter perlu diperketat.")
-                        if bt["profit_factor"] < 1.3: st.error("❌ Sistem belum profitable.")
-                        if bt["max_drawdown"] > 30: st.error("❌ Drawdown besar, kurangi risk per trade.")
-                        fig, ax = plt.subplots(figsize=(10,4))
-                        ax.plot(bt["equity"], color='green')
-                        ax.set_title("Equity Curve (Backtest)")
-                        ax.set_xlabel("Iteration")
-                        ax.set_ylabel("Balance (Rp)")
-                        st.pyplot(fig)
-                        # Monte Carlo
-                        st.markdown("### 🎲 Monte Carlo Simulation")
-                        mc_runs = st.slider("Jumlah simulasi", 100, 2000, 500, 100, key="mc_slider")
-                        if st.button("Jalankan Monte Carlo", key="mc_button"):
-                            with st.spinner("Running Monte Carlo..."):
-                                mc = monte_carlo_equity(bt["trade_list"], n_sim=mc_runs, start_balance=100_000_000)
-                                if mc:
-                                    final_bal = np.array(mc["final_balances"])
-                                    dd = np.array(mc["drawdowns"])
-                                    worst_dd = dd.max()
-                                    avg_dd = dd.mean()
-                                    median_dd = np.median(dd)
-                                    col_a, col_b, col_c = st.columns(3)
-                                    col_a.metric("Worst DD", f"{worst_dd:.1f}%")
-                                    col_b.metric("Average DD", f"{avg_dd:.1f}%")
-                                    col_c.metric("Median DD", f"{median_dd:.1f}%")
-                                    ruin_prob = np.mean(final_bal < 50_000_000) * 100
-                                    st.metric("💀 Risk of Ruin (<50% modal)", f"{ruin_prob:.1f}%")
-                                    if worst_dd > bt["max_drawdown"] * 1.5:
-                                        st.warning("⚠️ Risiko sebenarnya jauh lebih besar dari backtest!")
-                                    if avg_dd > 25:
-                                        st.error("❌ Drawdown tinggi, sistem berisiko")
-                                    else:
-                                        st.success("✅ Drawdown relatif stabil")
-                                    fig2, ax2 = plt.subplots(figsize=(10,5))
-                                    for path in mc["equity_curves"][:100]:
-                                        ax2.plot(path, alpha=0.2, linewidth=0.5)
-                                    ax2.set_title("Monte Carlo Equity Paths (100 sampel)")
-                                    ax2.set_xlabel("Trade sequence")
-                                    ax2.set_ylabel("Balance (Rp)")
-                                    st.pyplot(fig2)
-                                    fig3, ax3 = plt.subplots(figsize=(8,4))
-                                    ax3.hist(final_bal, bins=30)
-                                    ax3.set_title("Distribusi Final Balance")
-                                    ax3.set_xlabel("Balance (Rp)")
-                                    ax3.set_ylabel("Frekuensi")
-                                    st.pyplot(fig3)
-                                    p5 = np.percentile(final_bal, 5)
-                                    p95 = np.percentile(final_bal, 95)
-                                    st.write(f"📊 5th percentile (worst realistic): Rp {p5:,.0f}")
-                                    st.write(f"📈 95th percentile (best realistic): Rp {p95:,.0f}")
-                    else:
-                        st.warning("Data tidak cukup atau tidak ada sinyal")
-        with col2:
-            if st.button("Auto Tune Parameters (Risk & Threshold)"):
-                with st.spinner("Mencari parameter terbaik..."):
-                    best_params, best_score = tune_parameters(df, weights, ml_model, 180)
-                    if best_params:
-                        st.success(f"Parameter optimal: Risk = {best_params[0]*100:.1f}%, Threshold BUY = {best_params[1]:.1f}")
-                        st.write(f"Score (Sharpe - DD/100): {best_score:.2f}")
-                        st.info(f"Set risk ke {best_params[0]*100:.1f}% dan threshold BUY ke {best_params[1]:.1f}.")
-                    else:
-                        st.warning("Tuning gagal.")
-
-    with st.expander("🔧 Advanced Tools"):
+    # Opsi tuning bobot sederhana (tanpa backtest kompleks)
+    with st.expander("⚙️ Advanced Tuning"):
         if st.button("Optimize Weights (20 trials)"):
             with st.spinner("Mengoptimalkan bobot..."):
                 best_w = optimize_weights(df, trials=20)
                 if best_w:
                     st.session_state.optimized_weights = best_w
-                    st.success("Bobot optimal ditemukan! Silakan refresh.")
+                    st.success("Bobot optimal ditemukan! Silakan simpan.")
                 else:
                     st.warning("Optimasi gagal")
         if st.session_state.optimized_weights:
@@ -1267,30 +965,6 @@ def main():
             if st.button("Gunakan Bobot Optimasi"):
                 st.session_state.custom_weights = st.session_state.optimized_weights
                 st.rerun()
-        if st.button("Jalankan Walk-Forward (Profit-based + TimeSeriesCV)"):
-            with st.spinner("Walk-forward profit simulation..."):
-                profit = walk_forward_profit(df, train_size=200, test_size=50, use_xgb=use_xgb)
-                st.session_state.walk_forward_result = profit
-                st.success(f"Rata-rata Profit Factor out-of-sample: {profit:.2f}")
-        if st.session_state.walk_forward_result is not None:
-            st.metric("Walk-Forward PF", f"{st.session_state.walk_forward_result:.2f}")
-        st.markdown("---")
-        st.subheader("📊 Portfolio Multi-Stock Allocation")
-        default_tickers = ["BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "UNVR.JK"]
-        tickers_input = st.text_input("Daftar saham (pisah koma)", value=",".join(default_tickers))
-        if st.button("Run Portfolio Allocation"):
-            ticker_list = [t.strip() for t in tickers_input.split(",") if t.strip()]
-            with st.spinner("Menghitung alokasi portfolio..."):
-                portfolio = run_portfolio_backtest(ticker_list, weights, ml_model, period="1y", threshold_buy=threshold_buy, threshold_strong=threshold_strong)
-                if portfolio:
-                    df_port = pd.DataFrame(portfolio)
-                    st.dataframe(df_port[["ticker", "score", "allocation_%", "price"]])
-                    fig, ax = plt.subplots()
-                    ax.pie(df_port["allocation_%"], labels=df_port["ticker"], autopct='%1.1f%%')
-                    ax.set_title("Portfolio Allocation (Berdasarkan Skor)")
-                    st.pyplot(fig)
-                else:
-                    st.warning("Tidak ada data portfolio yang valid.")
 
     with st.expander("📜 Riwayat Sinyal & Ekspor"):
         if st.session_state.signal_history:
@@ -1307,7 +981,7 @@ def main():
             st.write(f"Jumlah saham: {shares:,} lembar")
             st.write(f"Nilai posisi: Rp {pos_value:,.0f} ({pos_value/capital*100:.1f}% dari modal)")
             st.write(f"Risiko stop loss: Rp {risk_amt:,.0f} ({risk_percent:.1f}%)")
-    st.caption("⚠️ Edukasi saja, bukan rekomendasi investasi. Backtest menggunakan risk-based, fee 0.15%, slippage 0.1%, spread 0.1%, likuiditas minimal. Fitur: Monte Carlo, Sharpe optimization, trailing stop, interaction term, MTF sebagai feature ML, label threshold 2%.")
+    st.caption("⚠️ Edukasi bukan rekomendasi. Global model dilatih dari BBCA, BBRI, TLKM, ASII, UNVR. Gunakan tombol Train Global Model untuk update.")
     gc.collect()
 
 if __name__ == "__main__":
