@@ -6,49 +6,30 @@ from datetime import datetime, timedelta
 import warnings
 import gc
 import random
+import traceback
 
-# ===================== FALLBACK UNTUK TA DAN XGBOOST =====================
+# ===================== FALLBACK UNTUK LIBRARY =====================
 try:
     import ta
     TA_AVAILABLE = True
 except ImportError:
     TA_AVAILABLE = False
-    st.warning("Library 'ta' tidak terinstal. Beberapa indikator akan dihitung manual.", icon="⚠️")
 
 try:
     from xgboost import XGBClassifier
     XGB_AVAILABLE = True
 except ImportError:
     XGB_AVAILABLE = False
-    st.info("XGBoost tidak terinstal. Gunakan RandomForest sebagai fallback (atau rule-based).", icon="ℹ️")
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore")
 
-# Konfigurasi halaman
+# Konfigurasi halaman (WAJIB di awal)
 st.set_page_config(layout="wide", page_title="Robot Saham v11 - Multi-Stock Global AI", page_icon="🤖")
 
-# CSS minimal
-st.markdown(
-    """
-<style>
-    .block-container { padding-top: 0.5rem; padding-bottom: 0rem; }
-    div[data-testid="stVerticalBlock"] > div { gap: 0.2rem; }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# ===================== KONSTANTA =====================
-CACHE_TTL = 300
-DEFAULT_TICKER = "BBCA.JK"
-TRADING_FEE = 0.0015
-SLIPPAGE = 0.001
-SPREAD = 0.001
-
-# Session state
+# ===================== SESSION STATE =====================
 if "signal_history" not in st.session_state:
     st.session_state.signal_history = []
 if "last_signal" not in st.session_state:
@@ -66,7 +47,7 @@ if "global_model" not in st.session_state:
 if "scaler" not in st.session_state:
     st.session_state.scaler = None
 
-# ===================== FUNGSI INDIKATOR MANUAL (jika ta tidak ada) =====================
+# ===================== FUNGSI INDIKATOR MANUAL =====================
 def manual_atr(high, low, close, window=14):
     tr = np.maximum(high - low, np.abs(high - close.shift()), np.abs(low - close.shift()))
     return tr.rolling(window).mean()
@@ -85,7 +66,6 @@ def manual_macd(close, fast=12, slow=26, signal=9):
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     return macd, signal_line, macd - signal_line
 
-# ===================== INDIKATOR LENGKAP (menggunakan ta jika ada) =====================
 def calculate_supertrend(df, period=10, multiplier=3.0):
     high = df["High"]
     low = df["Low"]
@@ -120,7 +100,7 @@ def calculate_supertrend(df, period=10, multiplier=3.0):
                     st_line.iloc[i] = min(upper.iloc[i], st_line.iloc[i-1])
     return st_line, direction
 
-@st.cache_data(ttl=CACHE_TTL)
+@st.cache_data(ttl=300)
 def calculate_all_indicators(df, st_period=10, st_mult=3.0):
     if df.empty:
         return pd.DataFrame()
@@ -129,7 +109,6 @@ def calculate_all_indicators(df, st_period=10, st_mult=3.0):
     low = df["Low"]
     volume = df.get("Volume", pd.Series(0, index=df.index))
 
-    # Sederhanakan: hanya indikator inti (hindari error)
     df_out = pd.DataFrame(index=df.index)
     df_out["Close"] = close
     df_out["High"] = high
@@ -157,12 +136,10 @@ def calculate_all_indicators(df, st_period=10, st_mult=3.0):
         df_out["ATR"] = manual_atr(high, low, close, 14)
         df_out["CMF"] = 0.0
 
-    # Supertrend
     st_line, st_dir = calculate_supertrend(df, st_period, st_mult)
     df_out["ST_Supertrend"] = st_line
     df_out["ST_Dir"] = st_dir
 
-    # Volume status sederhana
     if "Volume" in df.columns and df["Volume"].sum() != 0:
         vol_ma = volume.rolling(20).mean()
         df_out["Volume_Status"] = np.where(volume > vol_ma * 1.5, "Tinggi",
@@ -170,7 +147,6 @@ def calculate_all_indicators(df, st_period=10, st_mult=3.0):
     else:
         df_out["Volume_Status"] = "Normal"
 
-    # Swing points
     df_out["Swing_Low"] = low.rolling(5).min()
     df_out["Swing_High"] = high.rolling(5).max()
 
@@ -202,7 +178,6 @@ def get_latest_indicators(df):
 def detect_market_regime(df):
     if len(df) < 30:
         return "SIDEWAYS"
-    adx = 25  # simplified, bisa dihitung manual jika perlu
     ema20 = df["Close"].ewm(span=20).mean()
     slope = ema20.iloc[-1] - ema20.iloc[-5]
     if abs(slope / ema20.iloc[-1]) > 0.002:
@@ -247,7 +222,7 @@ def decision_engine_pro(indicators, regime, weights, threshold_buy=2.0, threshol
     else:
         return "HOLD", score
 
-# ===================== FUNGSI MODEL GLOBAL (opsional) =====================
+# ===================== MODEL GLOBAL =====================
 def train_global_model(ticker_list, period="1y", use_xgb=True):
     X_all, y_all = [], []
     for ticker in ticker_list:
@@ -256,7 +231,6 @@ def train_global_model(ticker_list, period="1y", use_xgb=True):
             if df_raw.empty:
                 continue
             df = calculate_all_indicators(df_raw, 10, 3.0)
-            # Sederhana: label dari future return 5 hari
             close = df["Close"]
             for i in range(60, len(df)-5):
                 ret = (close.iloc[i+5] - close.iloc[i]) / close.iloc[i]
@@ -275,7 +249,7 @@ def train_global_model(ticker_list, period="1y", use_xgb=True):
                 X_all.append(feat)
                 y_all.append(label)
         except Exception as e:
-            st.warning(f"Gagal training untuk {ticker}: {e}")
+            st.warning(f"Gagal training {ticker}: {e}")
     if len(X_all) < 100:
         return None, None
     scaler = StandardScaler()
@@ -300,7 +274,6 @@ def ml_predict(model, scaler, indicators):
 def final_decision(indicators, regime, weights, model, scaler, threshold_buy, threshold_strong):
     signal, score = decision_engine_pro(indicators, regime, weights, threshold_buy, threshold_strong)
     ml_prob = ml_predict(model, scaler, indicators) if model is not None else 0.5
-    # ML sebagai booster
     score += (ml_prob - 0.5) * 2.0
     score = max(-10, min(10, score))
     if score >= threshold_strong:
@@ -316,153 +289,159 @@ def final_decision(indicators, regime, weights, model, scaler, threshold_buy, th
 
 # ===================== MAIN APP =====================
 def main():
-    st.sidebar.markdown("# 🤖 Robot Saham v11 - Multi-Stock Global AI")
-    
-    ticker_input = st.sidebar.text_input("Kode Saham / Indeks", DEFAULT_TICKER)
-    ticker = ticker_input.upper().strip()
-    if not ticker.endswith(".JK") and not ticker.startswith("^"):
-        ticker += ".JK"
-    timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1wk", "1mo"], index=0)
-    trading_mode = st.sidebar.selectbox("Mode Trading", ["Swing (Daily)"], index=0)
-    ui_mode = st.sidebar.selectbox("Mode Tampilan", ["Simple (Recommended)", "Advanced"], index=0)
+    try:
+        # Sidebar
+        st.sidebar.markdown("# 🤖 Robot Saham v11 - Multi-Stock Global AI")
 
-    with st.sidebar.expander("⚙️ Bobot Indikator"):
-        weights = {
-            "trend": st.slider("Trend", 0.0, 3.0, st.session_state.custom_weights["trend"], 0.1),
-            "momentum": st.slider("Momentum", 0.0, 3.0, st.session_state.custom_weights["momentum"], 0.1),
-            "volume": st.slider("Volume", 0.0, 3.0, st.session_state.custom_weights["volume"], 0.1),
-            "smart_money": st.slider("Smart Money", 0.0, 3.0, st.session_state.custom_weights["smart_money"], 0.1),
-            "structure": st.slider("Structure", 0.0, 3.0, st.session_state.custom_weights["structure"], 0.1),
-        }
-        if st.button("Simpan Bobot"):
-            st.session_state.custom_weights = weights
+        ticker_input = st.sidebar.text_input("Kode Saham / Indeks", "BBCA.JK")
+        ticker = ticker_input.upper().strip()
+        if not ticker.endswith(".JK") and not ticker.startswith("^") and not ticker.endswith(".SA"):
+            ticker += ".JK"
+        timeframe = st.sidebar.selectbox("Timeframe", ["1d", "1wk", "1mo"], index=0)
+        ui_mode = st.sidebar.selectbox("Mode Tampilan", ["Simple (Recommended)", "Advanced"], index=0)
 
-    use_xgb = st.sidebar.checkbox("Gunakan XGBoost (lebih akurat)", value=XGB_AVAILABLE, disabled=not XGB_AVAILABLE)
-    
-    if st.sidebar.button("🔥 Train Global Model (Multi-Stock)"):
-        default_tickers = ["BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "UNVR.JK"]
-        tickers_input = st.sidebar.text_input("Daftar saham training", value=",".join(default_tickers))
-        ticker_list = [t.strip() for t in tickers_input.split(",") if t.strip()]
-        with st.spinner("Training global model..."):
-            model, scaler = train_global_model(ticker_list, period="1y", use_xgb=use_xgb)
-            if model is not None:
-                st.session_state.global_model = model
-                st.session_state.scaler = scaler
-                st.success("Global model siap!")
-            else:
-                st.error("Training gagal (data tidak cukup).")
+        with st.sidebar.expander("⚙️ Bobot Indikator"):
+            weights = {
+                "trend": st.slider("Trend", 0.0, 3.0, st.session_state.custom_weights["trend"], 0.1),
+                "momentum": st.slider("Momentum", 0.0, 3.0, st.session_state.custom_weights["momentum"], 0.1),
+                "volume": st.slider("Volume", 0.0, 3.0, st.session_state.custom_weights["volume"], 0.1),
+                "smart_money": st.slider("Smart Money", 0.0, 3.0, st.session_state.custom_weights["smart_money"], 0.1),
+                "structure": st.slider("Structure", 0.0, 3.0, st.session_state.custom_weights["structure"], 0.1),
+            }
+            if st.button("Simpan Bobot"):
+                st.session_state.custom_weights = weights
+        weights = st.session_state.custom_weights
 
-    if st.sidebar.button("🔄 Refresh Data"):
-        st.cache_data.clear()
-        st.rerun()
+        use_xgb = st.sidebar.checkbox("Gunakan XGBoost", value=XGB_AVAILABLE, disabled=not XGB_AVAILABLE)
 
-    # Download data
-    with st.spinner(f"Memuat {ticker}..."):
-        try:
-            df_raw = yf.download(ticker, period="1y", interval=timeframe, progress=False, auto_adjust=False)
-            if df_raw.empty:
-                st.error(f"Data {ticker} tidak tersedia. Periksa kode saham.")
-                st.stop()
-        except Exception as e:
-            st.error(f"Gagal download data: {e}")
-            st.stop()
+        if st.sidebar.button("🔥 Train Global Model"):
+            default_tickers = ["BBCA.JK", "BBRI.JK", "TLKM.JK", "ASII.JK", "UNVR.JK"]
+            tickers_input = st.sidebar.text_input("Daftar saham training", value=",".join(default_tickers))
+            ticker_list = [t.strip() for t in tickers_input.split(",") if t.strip()]
+            with st.spinner("Training global model..."):
+                model, scaler = train_global_model(ticker_list, period="1y", use_xgb=use_xgb)
+                if model is not None:
+                    st.session_state.global_model = model
+                    st.session_state.scaler = scaler
+                    st.success("Global model siap!")
+                else:
+                    st.error("Training gagal (data tidak cukup).")
 
-    df = calculate_all_indicators(df_raw, st_period=10, st_mult=3.0)
-    indicators = get_latest_indicators(df)
-    if not indicators:
-        st.error("Indikator gagal dihitung.")
-        st.stop()
+        if st.sidebar.button("🔄 Refresh Data"):
+            st.cache_data.clear()
+            st.rerun()
 
-    price = indicators["price"]
-    regime = detect_market_regime(df)
+        threshold_buy = st.sidebar.slider("Threshold BUY", 1.0, 5.0, 2.0, 0.5)
+        threshold_strong = st.sidebar.slider("Threshold STRONG", 3.0, 8.0, 4.0, 0.5)
 
-    # Threshold
-    threshold_buy = st.sidebar.slider("Threshold BUY", 1.0, 5.0, 2.0, 0.5)
-    threshold_strong = st.sidebar.slider("Threshold STRONG BUY", 3.0, 8.0, 4.0, 0.5)
+        # Ambil data
+        with st.spinner(f"Memuat {ticker}..."):
+            try:
+                df_raw = yf.download(ticker, period="1y", interval=timeframe, progress=False, auto_adjust=False)
+                if df_raw.empty:
+                    st.error(f"Data {ticker} tidak tersedia. Periksa kode.")
+                    return
+            except Exception as e:
+                st.error(f"Gagal download data: {e}")
+                return
 
-    # --- KEPUTUSAN AKHIR ---
-    model = st.session_state.global_model
-    scaler = st.session_state.scaler
-    signal, score, ml_prob = final_decision(indicators, regime, weights, model, scaler,
-                                            threshold_buy, threshold_strong)
+        df = calculate_all_indicators(df_raw, 10, 3.0)
+        if df.empty:
+            st.error("Indikator gagal dihitung.")
+            return
 
-    # Log dan toast
-    if signal != st.session_state.last_signal:
-        if signal in ["STRONG BUY", "BUY"]:
-            st.toast(f"🟢 Sinyal berubah menjadi {signal}!", icon="🔔")
-        elif signal in ["STRONG SELL", "SELL"]:
-            st.toast(f"🔴 Sinyal berubah menjadi {signal}!", icon="⚠️")
-        st.session_state.last_signal = signal
+        indicators = get_latest_indicators(df)
+        if not indicators:
+            st.error("Tidak bisa mengambil indikator terbaru.")
+            return
 
-    st.session_state.signal_history.insert(0, {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "ticker": ticker,
-        "signal": signal,
-        "score": score,
-        "price": price
-    })
-    if len(st.session_state.signal_history) > 50:
-        st.session_state.signal_history.pop()
+        price = indicators["price"]
+        regime = detect_market_regime(df)
 
-    # ===================== TAMPILAN UTAMA =====================
-    st.title(f"🤖 {ticker} (v11 Global AI)")
-    st.caption(f"Regime: {regime} | ML Prob: {ml_prob*100:.1f}% | Model Global: {'Aktif' if model else 'Tidak (rule only)'}")
+        model = st.session_state.global_model
+        scaler = st.session_state.scaler
+        signal, score, ml_prob = final_decision(indicators, regime, weights, model, scaler,
+                                                threshold_buy, threshold_strong)
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("💰 Harga", f"Rp {price:,.0f}")
-    col2.metric("📊 RSI", f"{indicators['rsi']:.1f}")
-    sup_dir = "🟢 UPTREND" if indicators["supertrend_dir"] == 1 else "🔴 DOWNTREND"
-    col3.metric("📈 Supertrend", sup_dir)
-    col4.metric("📊 Volume", indicators["volume_status"])
+        # Log
+        if signal != st.session_state.last_signal:
+            if signal in ["STRONG BUY", "BUY"]:
+                st.toast(f"🟢 Sinyal berubah menjadi {signal}!")
+            elif signal in ["STRONG SELL", "SELL"]:
+                st.toast(f"🔴 Sinyal berubah menjadi {signal}!")
+            st.session_state.last_signal = signal
 
-    col1, col2, col3 = st.columns(3)
-    if "STRONG BUY" in signal:
-        col1.success(f"### 🟢 {signal}")
-    elif "STRONG SELL" in signal:
-        col1.error(f"### 🔴 {signal}")
-    elif "BUY" in signal:
-        col1.info(f"### 📈 {signal}")
-    elif "SELL" in signal:
-        col1.warning(f"### 📉 {signal}")
-    else:
-        col1.warning(f"### 🟡 {signal}")
-    col2.metric("🎯 Skor", f"{score:.1f}")
-    col3.metric("🤖 AI Confidence", f"{ml_prob*100:.1f}%")
+        st.session_state.signal_history.insert(0, {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ticker": ticker,
+            "signal": signal,
+            "score": score,
+            "price": price
+        })
+        if len(st.session_state.signal_history) > 50:
+            st.session_state.signal_history.pop()
 
-    # Entry layak?
-    if score >= threshold_buy:
-        st.success(f"🟢 **ENTRY LAYAK** (Skor: {score:.1f} | ML: {ml_prob*100:.0f}%)")
-    else:
-        st.error(f"🔴 **TIDAK LAYAK ENTRY** (Skor: {score:.1f})")
+        # Tampilan utama
+        st.title(f"🤖 {ticker} (v11 Global AI)")
+        st.caption(f"Regime: {regime} | ML Prob: {ml_prob*100:.1f}% | Model Global: {'Aktif' if model else 'Tidak (rule only)'}")
 
-    with st.expander("📖 Arti Sinyal"):
-        interpretations = {
-            "STRONG BUY": "Peluang naik sangat kuat. Hybrid AI + global model.",
-            "BUY": "Kondisi cukup baik. Masih ada ruang naik.",
-            "HOLD": "Tidak ada sinyal jelas. Tunggu breakout.",
-            "SELL": "Tekanan turun mulai terlihat. Pertimbangkan exit.",
-            "STRONG SELL": "Kondisi lemah. Risiko besar, hindari entry.",
-        }
-        st.write(interpretations.get(signal, "Netral."))
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("💰 Harga", f"Rp {price:,.0f}")
+        col2.metric("📊 RSI", f"{indicators['rsi']:.1f}")
+        sup_dir = "🟢 UPTREND" if indicators["supertrend_dir"] == 1 else "🔴 DOWNTREND"
+        col3.metric("📈 Supertrend", sup_dir)
+        col4.metric("📊 Volume", indicators["volume_status"])
 
-    if ui_mode == "Advanced":
-        with st.expander("📋 Detail Analisis"):
-            fv = build_feature_vector(indicators)
-            st.write(f"- Trend: {fv['trend']:.2f}")
-            st.write(f"- Momentum: {fv['momentum']:.2f}")
-            st.write(f"- Volume: {fv['volume']:.2f}")
-            st.write(f"- Smart Money: {fv['smart']:.2f}")
-            st.write(f"- Structure: {fv['structure']:.2f}")
-            st.write(f"- Final Score: {score:.2f}")
-
-    with st.expander("📜 Riwayat Sinyal"):
-        if st.session_state.signal_history:
-            st.dataframe(pd.DataFrame(st.session_state.signal_history).head(10))
+        col1, col2, col3 = st.columns(3)
+        if "STRONG BUY" in signal:
+            col1.success(f"### 🟢 {signal}")
+        elif "STRONG SELL" in signal:
+            col1.error(f"### 🔴 {signal}")
+        elif "BUY" in signal:
+            col1.info(f"### 📈 {signal}")
+        elif "SELL" in signal:
+            col1.warning(f"### 📉 {signal}")
         else:
-            st.info("Belum ada sinyal")
+            col1.warning(f"### 🟡 {signal}")
+        col2.metric("🎯 Skor", f"{score:.1f}")
+        col3.metric("🤖 AI Confidence", f"{ml_prob*100:.1f}%")
 
-    st.caption("⚠️ Edukasi bukan rekomendasi. Pastikan library `ta` dan `xgboost` (opsional) terinstal.")
-    gc.collect()
+        if score >= threshold_buy:
+            st.success(f"🟢 **ENTRY LAYAK** (Skor: {score:.1f})")
+        else:
+            st.error(f"🔴 **TIDAK LAYAK ENTRY** (Skor: {score:.1f})")
+
+        with st.expander("📖 Arti Sinyal"):
+            interpretations = {
+                "STRONG BUY": "Peluang naik sangat kuat. Hybrid AI + global model.",
+                "BUY": "Kondisi cukup baik. Masih ada ruang naik.",
+                "HOLD": "Tidak ada sinyal jelas. Tunggu breakout.",
+                "SELL": "Tekanan turun mulai terlihat. Pertimbangkan exit.",
+                "STRONG SELL": "Kondisi lemah. Risiko besar, hindari entry.",
+            }
+            st.write(interpretations.get(signal, "Netral."))
+
+        if ui_mode == "Advanced":
+            with st.expander("📋 Detail Analisis"):
+                fv = build_feature_vector(indicators)
+                st.write(f"- Trend: {fv['trend']:.2f}")
+                st.write(f"- Momentum: {fv['momentum']:.2f}")
+                st.write(f"- Volume: {fv['volume']:.2f}")
+                st.write(f"- Smart Money: {fv['smart']:.2f}")
+                st.write(f"- Structure: {fv['structure']:.2f}")
+
+        with st.expander("📜 Riwayat Sinyal"):
+            if st.session_state.signal_history:
+                st.dataframe(pd.DataFrame(st.session_state.signal_history).head(10))
+            else:
+                st.info("Belum ada sinyal")
+
+        st.caption("⚠️ Edukasi bukan rekomasi. Pastikan library `ta` dan `xgboost` terinstal.")
+        gc.collect()
+
+    except Exception as e:
+        st.error(f"Terjadi error: {str(e)}")
+        st.code(traceback.format_exc())
 
 if __name__ == "__main__":
     main()
