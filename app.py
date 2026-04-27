@@ -65,36 +65,33 @@ def manual_macd(close, fast=12, slow=26, signal=9):
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     return macd, signal_line, macd - signal_line
 
-def calculate_supertrend(df_high, df_low, df_close, period=10, multiplier=3.0):
+def calculate_supertrend(high_series, low_series, close_series, period=10, multiplier=3.0):
     """
-    df_high, df_low, df_close harus berupa Series 1D
+    high_series, low_series, close_series: pandas Series 1D
     """
-    high = df_high
-    low = df_low
-    close = df_close
     if TA_AVAILABLE:
-        atr = ta.volatility.average_true_range(high, low, close, window=period)
+        atr = ta.volatility.average_true_range(high_series, low_series, close_series, window=period)
     else:
-        atr = manual_atr(high, low, close, period)
-    hl_avg = (high + low) / 2
+        atr = manual_atr(high_series, low_series, close_series, period)
+    hl_avg = (high_series + low_series) / 2
     upper = hl_avg + (multiplier * atr)
     lower = hl_avg - (multiplier * atr)
-    st_line = pd.Series(index=close.index, dtype=float)
-    direction = pd.Series(index=close.index, dtype=int)
-    for i in range(period, len(close)):
+    st_line = pd.Series(index=close_series.index, dtype=float)
+    direction = pd.Series(index=close_series.index, dtype=int)
+    for i in range(period, len(close_series)):
         if i == period:
             st_line.iloc[i] = upper.iloc[i]
-            direction.iloc[i] = 1 if close.iloc[i] > st_line.iloc[i] else -1
+            direction.iloc[i] = 1 if close_series.iloc[i] > st_line.iloc[i] else -1
         else:
             if direction.iloc[i-1] == 1:
-                if close.iloc[i] < lower.iloc[i]:
+                if close_series.iloc[i] < lower.iloc[i]:
                     direction.iloc[i] = -1
                     st_line.iloc[i] = upper.iloc[i]
                 else:
                     direction.iloc[i] = 1
                     st_line.iloc[i] = max(lower.iloc[i], st_line.iloc[i-1])
             else:
-                if close.iloc[i] > upper.iloc[i]:
+                if close_series.iloc[i] > upper.iloc[i]:
                     direction.iloc[i] = 1
                     st_line.iloc[i] = lower.iloc[i]
                 else:
@@ -105,62 +102,72 @@ def calculate_supertrend(df_high, df_low, df_close, period=10, multiplier=3.0):
 @st.cache_data(ttl=300)
 def calculate_all_indicators(df, st_period=10, st_mult=3.0):
     """
-    df adalah DataFrame dari yfinance. Pastikan kolom Close, High, Low, Volume.
+    df adalah DataFrame dari yfinance. Kolom akan di-squeeze menjadi Series 1D.
     """
     if df.empty:
         return pd.DataFrame()
     
-    # Konversi setiap kolom menjadi Series 1D (squeeze)
-    close = df["Close"].squeeze()
-    high = df["High"].squeeze()
-    low = df["Low"].squeeze()
-    volume = df["Volume"].squeeze() if "Volume" in df.columns else pd.Series(0, index=df.index)
+    # Konversi setiap kolom menjadi Series 1D
+    close_series = df["Close"].squeeze()
+    high_series = df["High"].squeeze()
+    low_series = df["Low"].squeeze()
     
-    # Buat DataFrame output
+    # Volume handling: cek keberadaan dan apakah ada data volume
+    if "Volume" in df.columns:
+        vol_series = df["Volume"].squeeze()
+        # Hitung sum sebagai scalar
+        total_volume = float(vol_series.sum())
+        has_volume = total_volume != 0
+    else:
+        vol_series = pd.Series(0, index=df.index)
+        has_volume = False
+    
+    # DataFrame output
     df_out = pd.DataFrame(index=df.index)
-    df_out["Close"] = close
-    df_out["High"] = high
-    df_out["Low"] = low
-    df_out["Volume"] = volume
+    df_out["Close"] = close_series
+    df_out["High"] = high_series
+    df_out["Low"] = low_series
+    df_out["Volume"] = vol_series
     
-    df_out["SMA20"] = close.rolling(20).mean()
-    df_out["SMA50"] = close.rolling(50).mean()
-    df_out["EMA200"] = close.ewm(span=200, adjust=False).mean()
+    df_out["SMA20"] = close_series.rolling(20).mean()
+    df_out["SMA50"] = close_series.rolling(50).mean()
+    df_out["EMA200"] = close_series.ewm(span=200, adjust=False).mean()
     
     if TA_AVAILABLE:
-        # pastikan semua input adalah Series
-        df_out["RSI"] = ta.momentum.rsi(close, window=14)
-        macd = ta.trend.MACD(close)
+        df_out["RSI"] = ta.momentum.rsi(close_series, window=14)
+        macd = ta.trend.MACD(close_series)
         df_out["MACD_Hist"] = macd.macd_diff()
-        df_out["Stoch_K"] = ta.momentum.stoch(high, low, close, window=14, smooth_window=3)
-        df_out["ATR"] = ta.volatility.average_true_range(high, low, close, window=14)
-        if "Volume" in df.columns and df["Volume"].sum() != 0:
-            df_out["CMF"] = ta.volume.chaikin_money_flow(high, low, close, volume, window=20)
+        df_out["Stoch_K"] = ta.momentum.stoch(high_series, low_series, close_series, window=14, smooth_window=3)
+        df_out["ATR"] = ta.volatility.average_true_range(high_series, low_series, close_series, window=14)
+        if has_volume:
+            df_out["CMF"] = ta.volume.chaikin_money_flow(high_series, low_series, close_series, vol_series, window=20)
         else:
             df_out["CMF"] = 0.0
     else:
-        df_out["RSI"] = manual_rsi(close, 14)
-        _, _, df_out["MACD_Hist"] = manual_macd(close)
+        df_out["RSI"] = manual_rsi(close_series, 14)
+        _, _, df_out["MACD_Hist"] = manual_macd(close_series)
         df_out["Stoch_K"] = 50.0
-        df_out["ATR"] = manual_atr(high, low, close, 14)
+        df_out["ATR"] = manual_atr(high_series, low_series, close_series, 14)
         df_out["CMF"] = 0.0
     
-    # Supertrend (menggunakan Series)
-    st_line, st_dir = calculate_supertrend(high, low, close, st_period, st_mult)
+    # Supertrend
+    st_line, st_dir = calculate_supertrend(high_series, low_series, close_series, st_period, st_mult)
     df_out["ST_Supertrend"] = st_line
     df_out["ST_Dir"] = st_dir
     
     # Volume status
-    if "Volume" in df.columns and df["Volume"].sum() != 0:
-        vol_ma = volume.rolling(20).mean()
-        df_out["Volume_Status"] = np.where(volume > vol_ma * 1.5, "Tinggi",
-                                           np.where(volume < vol_ma, "Rendah", "Normal"))
+    if has_volume:
+        vol_ma = vol_series.rolling(20).mean()
+        # Boolean Series kemudian di-convert ke string via np.where
+        condition_high = vol_series > vol_ma * 1.5
+        condition_low = vol_series < vol_ma
+        df_out["Volume_Status"] = np.where(condition_high, "Tinggi",
+                                           np.where(condition_low, "Rendah", "Normal"))
     else:
         df_out["Volume_Status"] = "Normal"
     
-    # Swing points
-    df_out["Swing_Low"] = low.rolling(5).min()
-    df_out["Swing_High"] = high.rolling(5).max()
+    df_out["Swing_Low"] = low_series.rolling(5).min()
+    df_out["Swing_High"] = high_series.rolling(5).max()
     
     df_out = df_out.ffill().fillna(0)
     return df_out
@@ -190,8 +197,8 @@ def get_latest_indicators(df):
 def detect_market_regime(df):
     if len(df) < 30:
         return "SIDEWAYS"
-    close = df["Close"].squeeze()
-    ema20 = close.ewm(span=20).mean()
+    close_series = df["Close"].squeeze()
+    ema20 = close_series.ewm(span=20).mean()
     slope = ema20.iloc[-1] - ema20.iloc[-5]
     if abs(slope / ema20.iloc[-1]) > 0.002:
         return "TREND"
@@ -244,9 +251,9 @@ def train_global_model(ticker_list, period="1y", use_xgb=True):
             if df_raw.empty:
                 continue
             df = calculate_all_indicators(df_raw, 10, 3.0)
-            close = df["Close"].squeeze()
+            close_series = df["Close"].squeeze()
             for i in range(60, len(df)-5):
-                ret = (close.iloc[i+5] - close.iloc[i]) / close.iloc[i]
+                ret = (close_series.iloc[i+5] - close_series.iloc[i]) / close_series.iloc[i]
                 if ret > 0.02:
                     label = 1
                 elif ret < -0.02:
