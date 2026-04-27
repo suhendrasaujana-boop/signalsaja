@@ -8,7 +8,7 @@ import gc
 import random
 import traceback
 
-# ===================== FALLBACK UNTUK LIBRARY =====================
+# ===================== FALLBACK =====================
 try:
     import ta
     TA_AVAILABLE = True
@@ -26,7 +26,6 @@ from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore")
 
-# Konfigurasi halaman (WAJIB di awal)
 st.set_page_config(layout="wide", page_title="Robot Saham v11 - Multi-Stock Global AI", page_icon="🤖")
 
 # ===================== SESSION STATE =====================
@@ -66,10 +65,13 @@ def manual_macd(close, fast=12, slow=26, signal=9):
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     return macd, signal_line, macd - signal_line
 
-def calculate_supertrend(df, period=10, multiplier=3.0):
-    high = df["High"]
-    low = df["Low"]
-    close = df["Close"]
+def calculate_supertrend(df_high, df_low, df_close, period=10, multiplier=3.0):
+    """
+    df_high, df_low, df_close harus berupa Series 1D
+    """
+    high = df_high
+    low = df_low
+    close = df_close
     if TA_AVAILABLE:
         atr = ta.volatility.average_true_range(high, low, close, window=period)
     else:
@@ -77,9 +79,9 @@ def calculate_supertrend(df, period=10, multiplier=3.0):
     hl_avg = (high + low) / 2
     upper = hl_avg + (multiplier * atr)
     lower = hl_avg - (multiplier * atr)
-    st_line = pd.Series(index=df.index, dtype=float)
-    direction = pd.Series(index=df.index, dtype=int)
-    for i in range(period, len(df)):
+    st_line = pd.Series(index=close.index, dtype=float)
+    direction = pd.Series(index=close.index, dtype=int)
+    for i in range(period, len(close)):
         if i == period:
             st_line.iloc[i] = upper.iloc[i]
             direction.iloc[i] = 1 if close.iloc[i] > st_line.iloc[i] else -1
@@ -102,24 +104,31 @@ def calculate_supertrend(df, period=10, multiplier=3.0):
 
 @st.cache_data(ttl=300)
 def calculate_all_indicators(df, st_period=10, st_mult=3.0):
+    """
+    df adalah DataFrame dari yfinance. Pastikan kolom Close, High, Low, Volume.
+    """
     if df.empty:
         return pd.DataFrame()
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
-    volume = df.get("Volume", pd.Series(0, index=df.index))
-
+    
+    # Konversi setiap kolom menjadi Series 1D (squeeze)
+    close = df["Close"].squeeze()
+    high = df["High"].squeeze()
+    low = df["Low"].squeeze()
+    volume = df["Volume"].squeeze() if "Volume" in df.columns else pd.Series(0, index=df.index)
+    
+    # Buat DataFrame output
     df_out = pd.DataFrame(index=df.index)
     df_out["Close"] = close
     df_out["High"] = high
     df_out["Low"] = low
     df_out["Volume"] = volume
-
+    
     df_out["SMA20"] = close.rolling(20).mean()
     df_out["SMA50"] = close.rolling(50).mean()
     df_out["EMA200"] = close.ewm(span=200, adjust=False).mean()
-
+    
     if TA_AVAILABLE:
+        # pastikan semua input adalah Series
         df_out["RSI"] = ta.momentum.rsi(close, window=14)
         macd = ta.trend.MACD(close)
         df_out["MACD_Hist"] = macd.macd_diff()
@@ -135,21 +144,24 @@ def calculate_all_indicators(df, st_period=10, st_mult=3.0):
         df_out["Stoch_K"] = 50.0
         df_out["ATR"] = manual_atr(high, low, close, 14)
         df_out["CMF"] = 0.0
-
-    st_line, st_dir = calculate_supertrend(df, st_period, st_mult)
+    
+    # Supertrend (menggunakan Series)
+    st_line, st_dir = calculate_supertrend(high, low, close, st_period, st_mult)
     df_out["ST_Supertrend"] = st_line
     df_out["ST_Dir"] = st_dir
-
+    
+    # Volume status
     if "Volume" in df.columns and df["Volume"].sum() != 0:
         vol_ma = volume.rolling(20).mean()
         df_out["Volume_Status"] = np.where(volume > vol_ma * 1.5, "Tinggi",
                                            np.where(volume < vol_ma, "Rendah", "Normal"))
     else:
         df_out["Volume_Status"] = "Normal"
-
+    
+    # Swing points
     df_out["Swing_Low"] = low.rolling(5).min()
     df_out["Swing_High"] = high.rolling(5).max()
-
+    
     df_out = df_out.ffill().fillna(0)
     return df_out
 
@@ -178,7 +190,8 @@ def get_latest_indicators(df):
 def detect_market_regime(df):
     if len(df) < 30:
         return "SIDEWAYS"
-    ema20 = df["Close"].ewm(span=20).mean()
+    close = df["Close"].squeeze()
+    ema20 = close.ewm(span=20).mean()
     slope = ema20.iloc[-1] - ema20.iloc[-5]
     if abs(slope / ema20.iloc[-1]) > 0.002:
         return "TREND"
@@ -231,7 +244,7 @@ def train_global_model(ticker_list, period="1y", use_xgb=True):
             if df_raw.empty:
                 continue
             df = calculate_all_indicators(df_raw, 10, 3.0)
-            close = df["Close"]
+            close = df["Close"].squeeze()
             for i in range(60, len(df)-5):
                 ret = (close.iloc[i+5] - close.iloc[i]) / close.iloc[i]
                 if ret > 0.02:
@@ -290,7 +303,6 @@ def final_decision(indicators, regime, weights, model, scaler, threshold_buy, th
 # ===================== MAIN APP =====================
 def main():
     try:
-        # Sidebar
         st.sidebar.markdown("# 🤖 Robot Saham v11 - Multi-Stock Global AI")
 
         ticker_input = st.sidebar.text_input("Kode Saham / Indeks", "BBCA.JK")
@@ -334,7 +346,6 @@ def main():
         threshold_buy = st.sidebar.slider("Threshold BUY", 1.0, 5.0, 2.0, 0.5)
         threshold_strong = st.sidebar.slider("Threshold STRONG", 3.0, 8.0, 4.0, 0.5)
 
-        # Ambil data
         with st.spinner(f"Memuat {ticker}..."):
             try:
                 df_raw = yf.download(ticker, period="1y", interval=timeframe, progress=False, auto_adjust=False)
@@ -363,7 +374,6 @@ def main():
         signal, score, ml_prob = final_decision(indicators, regime, weights, model, scaler,
                                                 threshold_buy, threshold_strong)
 
-        # Log
         if signal != st.session_state.last_signal:
             if signal in ["STRONG BUY", "BUY"]:
                 st.toast(f"🟢 Sinyal berubah menjadi {signal}!")
@@ -381,7 +391,6 @@ def main():
         if len(st.session_state.signal_history) > 50:
             st.session_state.signal_history.pop()
 
-        # Tampilan utama
         st.title(f"🤖 {ticker} (v11 Global AI)")
         st.caption(f"Regime: {regime} | ML Prob: {ml_prob*100:.1f}% | Model Global: {'Aktif' if model else 'Tidak (rule only)'}")
 
@@ -436,7 +445,7 @@ def main():
             else:
                 st.info("Belum ada sinyal")
 
-        st.caption("⚠️ Edukasi bukan rekomasi. Pastikan library `ta` dan `xgboost` terinstal.")
+        st.caption("⚠️ Edukasi bukan rekomendasi. Pastikan library `ta` dan `xgboost` terinstal.")
         gc.collect()
 
     except Exception as e:
